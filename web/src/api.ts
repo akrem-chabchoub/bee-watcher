@@ -1,6 +1,11 @@
 import type {
   ActionResponse,
   BeeEvent,
+  ControlSettings,
+  ControlStatus,
+  Job,
+  JobLog,
+  Upload,
   Bucket,
   ChunkLookup,
   FlowFrame,
@@ -47,6 +52,33 @@ function qs(p: Params): string {
   const s = u.toString();
   return s ? "?" + s : "";
 }
+
+/** Parses a JSON error body ({"error": "..."}) or falls back to the text. */
+async function errorOf(r: Response): Promise<HttpError> {
+  const text = await r.text().catch(() => "");
+  let msg = text.trim() || r.statusText;
+  try {
+    const j = JSON.parse(text) as { error?: unknown };
+    if (j && typeof j === "object" && j.error) msg = String(j.error);
+  } catch {
+    /* plain text */
+  }
+  return new HttpError(r.status, msg);
+}
+
+async function send<T>(method: "POST" | "PUT", path: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+  const r = await fetch(path, {
+    method,
+    signal,
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ confirm: true, ...body }),
+  });
+  if (!r.ok) throw await errorOf(r);
+  const text = await r.text();
+  return (text ? JSON.parse(text) : null) as T;
+}
+
+const enc = encodeURIComponent;
 
 export interface EventQuery {
   from?: string | number;
@@ -105,5 +137,38 @@ export const api = {
       return { ok: false, status: r.status, ms: 0, body: parsed, error: msg };
     }
     return parsed as ActionResponse;
+  },
+  control: {
+    status: (s?: AbortSignal) => get<ControlStatus>("/api/control/status", s),
+    settings: (s?: AbortSignal) => get<ControlSettings>("/api/control/settings", s),
+    saveSettings: (v: Partial<ControlSettings>) => send<ControlSettings>("PUT", "/api/control/settings", v as Record<string, unknown>),
+    run: (name: string, body: Record<string, unknown> = {}) => send<{ job: Job }>("POST", `/api/control/actions/${enc(name)}`, body).then((x) => x.job),
+    jobs: (s?: AbortSignal) => get<Job[] | null>("/api/control/jobs", s).then((x) => x ?? []),
+    log: (id: string, after: number, s?: AbortSignal) => get<JobLog>(`/api/control/jobs/${enc(id)}/log` + qs({ after }), s),
+    cancel: (id: string) => send<{ job: Job }>("POST", `/api/control/jobs/${enc(id)}/cancel`, {}).then((x) => x.job),
+  },
+  data: {
+    /** Read-only passthrough; resolves Bee's JSON body. */
+    get: async <T>(node: string, path: string, s?: AbortSignal): Promise<T> => {
+      const r = await fetch(`/api/data/${enc(node)}/get` + qs({ path }), { signal: s, headers: { Accept: "application/json" } });
+      if (!r.ok) throw await errorOf(r);
+      return (await r.json()) as T;
+    },
+    buyStamp: (node: string, b: { amount: string; depth: number; label: string; immutable: boolean }) =>
+      send<{ batchID: string; txHash: string }>("POST", `/api/data/${enc(node)}/stamps`, b),
+    topup: (node: string, id: string, amount: string) => send<unknown>("POST", `/api/data/${enc(node)}/stamps/${enc(id)}/topup`, { amount }),
+    dilute: (node: string, id: string, depth: number) => send<unknown>("POST", `/api/data/${enc(node)}/stamps/${enc(id)}/dilute`, { depth }),
+    uploads: (s?: AbortSignal) => get<Upload[] | null>("/api/data/uploads", s).then((x) => x ?? []),
+    uploadURL: (node: string, p: { batch: string; name: string; pin: boolean; encrypt: boolean; deferred: boolean; redundancy: number }) =>
+      `/api/data/${enc(node)}/upload?` +
+      new URLSearchParams({
+        batch: p.batch,
+        name: p.name,
+        pin: p.pin ? "1" : "0",
+        encrypt: p.encrypt ? "1" : "0",
+        deferred: p.deferred ? "1" : "0",
+        redundancy: String(p.redundancy),
+      }).toString(),
+    downloadURL: (node: string, ref: string, path = "", name = "") => `/api/data/${enc(node)}/download/${enc(ref)}` + qs({ path, name }),
   },
 };

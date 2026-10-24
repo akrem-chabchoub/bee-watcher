@@ -398,3 +398,134 @@ export type Selection =
   | { type: "operation"; id: string }
   | { type: "peer"; address: string; node?: string }
   | { type: "corr"; kind: string; id: string }; // chunk, batch, trace, tag
+
+// ---- Control (docs/CONTROL-API.md) ----
+
+export interface ToolStatus {
+  name: string;
+  path: string;
+  ok: boolean;
+  hint: string;
+}
+
+export interface ControlSettings {
+  beelocalDir: string;
+  beekeeperConfigDir: string;
+  beeRepoDir: string;
+  beekeeper: string;
+  profile: string;
+  counts: Record<string, number>;
+  image: string;
+  detected?: Record<string, boolean>;
+}
+
+export interface ControlNode {
+  name: string;
+  group: string;
+  replicas: number;
+  ready: number;
+  image: string;
+  pod: string;
+  phase: string;
+  restarts: number;
+  startedAt: string;
+  reason: string;
+}
+
+export interface ProfileGroup {
+  name: string;
+  mode: string;
+  count: number;
+}
+
+export interface Profile {
+  name: string;
+  groups: ProfileGroup[];
+  image: string;
+}
+
+export type JobState = "running" | "succeeded" | "failed" | "canceled";
+export type StepState = "pending" | "running" | "done" | "failed" | "skipped";
+
+export interface Job {
+  id: string;
+  action: string;
+  title: string;
+  state: JobState;
+  startedAt: string;
+  endedAt: string;
+  error: string;
+  steps: { title: string; state: StepState }[] | null;
+  lines: number;
+}
+
+export interface JobLine {
+  n: number;
+  t: string;
+  stream: "out" | "err" | "info";
+  text: string;
+}
+
+export interface JobLog {
+  job: Job;
+  lines: JobLine[] | null;
+  next: number;
+}
+
+export interface ControlStatus {
+  enabled: boolean;
+  disabledReason: string;
+  settings: ControlSettings;
+  tools: ToolStatus[] | null;
+  docker: { running: boolean; error: string };
+  cluster: {
+    name: string;
+    kubeContext: string;
+    namespace: string;
+    exists: boolean;
+    running: boolean;
+    registryRunning: boolean;
+    /** Host port of k3d-registry.localhost (not always 5000). */
+    registryPort?: string;
+    /** k3d-registry.localhost:<port>/ethersphere/bee:latest; empty when the registry is not running. */
+    localImage?: string;
+    error: string;
+  };
+  geth: { installed: boolean; ready: boolean };
+  nodes: ControlNode[] | null;
+  deployed: { groups: Record<string, number> | null; image: string };
+  profiles: Profile[] | null;
+  checks: string[] | null;
+  job: Job | null;
+}
+
+// ---- Data (Bee API passthrough) ----
+
+export interface Upload {
+  id: string;
+  node: string;
+  name: string;
+  size: number;
+  contentType: string;
+  batch: string;
+  reference: string;
+  tagUid: number;
+  at: string;
+  encrypt: boolean;
+  pin: boolean;
+}
+
+/** A batch as Bee returns it from GET /stamps (fuller than the engine's Stamp). */
+export interface BeeStamp {
+  batchID: string;
+  label: string;
+  depth: number;
+  bucketDepth: number;
+  amount: string;
+  utilization: number;
+  usable: boolean;
+  exists: boolean;
+  batchTTL: number;
+  immutableFlag: boolean;
+  blockNumber?: number;
+}

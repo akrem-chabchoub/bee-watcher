@@ -6,7 +6,10 @@ peer links between them as live entities. It draws activity only when a real
 source observed it, detects anomalies and explains them, and keeps every
 symptom one click away from its evidence.
 
-bee-scope is read-only by default and makes no Bee code changes. Sources:
+Observation is read-only and needs no Bee code changes. The Cluster and Data
+tabs add explicit controls: create the cluster, deploy and scale nodes,
+restart nodes, run beekeeper checks, buy stamps, and upload and download
+data. Sources for observation:
 the Bee HTTP API, `/metrics`, pod logs through the kube API, and optionally
 OTLP traces. See [docs/DATA-SOURCES.md](docs/DATA-SOURCES.md) for exactly
 what is and is not observable.
@@ -14,6 +17,20 @@ what is and is not observable.
 ## Quick start
 
 Requirements: Go 1.26, Node 22 and npm (only to build the UI).
+
+**Without a terminal (macOS):** build the app once, then use it like any
+other app:
+
+```bash
+make install-app           # puts BeeScope.app in ~/Applications
+```
+
+Open **BeeScope** from Launchpad or Spotlight. It starts in the background,
+opens http://127.0.0.1:7070, and if it is already running it just opens the
+page again. Stop it with the ⏻ Quit button in the UI. Logs go to
+`~/Library/Logs/bee-scope.log`. From the **Cluster** tab you can start
+Docker, create or start the k3d cluster, deploy Bee nodes, and run checks.
+The **Data** tab handles stamps and uploads.
 
 ```bash
 make build                 # builds the UI, then dist/bee-scope with the UI embedded
@@ -65,7 +82,72 @@ The simulation scenario (scenario seconds, repeating):
 | `--intervals` | | overrides such as `health=5s,metrics=10s`. Keys: discovery, health, status, topology, metrics, tags, stamps, chainstate, redistribution. `0` disables one; redistribution must stay ≥ 30 s |
 | `--history` | `30m` | in-memory history window (events, keyframes every 5 s, logs, raw payloads) |
 | `--dev`, `--dev-url` | off, `http://127.0.0.1:5173` | proxy the UI to the Vite dev server |
+| `--open` | off | open the UI in the browser once ready (the app bundle uses it) |
 | `-v`, `--version` | | |
+
+## Cluster tab (no terminal needed)
+
+The Cluster tab runs the same steps you would otherwise type. Each one runs
+as a job, with its steps and live output in the side panel. Jobs run one at
+a time and can be cancelled.
+
+- **Setup checklist:** tools → Docker → k3d cluster → geth → Bee nodes. Each
+  row has the button that fixes it: **Start Docker** (`open -a Docker`),
+  **Create cluster** or **Start cluster**, and **Deploy nodes**.
+- **Create cluster** follows beelocal's `k8s-local` from your beelocal
+  checkout:
+  1. the local registry;
+  2. `k3d cluster create` with `config/k3d.yaml` and the `K3S_VERSION` /
+     `REGISTRY_PORT` defaults read from `beelocal.sh`;
+  3. the ethersphere helm repo and Traefik;
+  4. geth-swap with the contract setup job.
+
+  It does not edit `/etc/hosts`, because that needs sudo. If an entry
+  is missing, bee-scope prints the one-line command to add it.
+- **Deploy nodes:** choose a beekeeper profile (any cluster in your
+  beekeeper config dir whose namespace is `local`), a count per node group,
+  and an image. bee-scope writes a `bee-scope` cluster that inherits the
+  profile, and runs `beekeeper create bee-cluster`. Deploying again with
+  smaller counts deletes the extra nodes, so the same form scales up and
+  down.
+- **Per node:** Restart (deletes the pod), Stop and Start (scales the
+  statefulset to 0 or 1). There is also Restart all, Remove all nodes,
+  Stop cluster and Delete cluster.
+- **Build Bee image:** runs `make docker-build` in your bee checkout for the
+  host architecture and pushes to the local registry. The deploy form then
+  offers `k3d-registry.localhost:<port>/ethersphere/bee:<tag>`.
+- **Checks:** pick beekeeper checks (the `ci-*` ones first) and run them
+  against the deployed nodes.
+- **Settings:** the beelocal, beekeeper config, bee repo and beekeeper binary
+  paths. They are auto-detected from `~/.beekeeper.yaml` and the folders
+  around it, and stored in
+  `~/Library/Application Support/bee-scope/settings.json`.
+
+Every command targets the k3d context explicitly (`kubectl --context`,
+`helm --kube-context`, beekeeper with a single-context kubeconfig). A
+different current kube context is never touched. Job output never shows
+the beekeeper wallet key.
+
+## Data tab
+
+Pick a node, then:
+
+- **Wallet and addresses:** see its wallet balances and addresses.
+- **Postage batches:** buy, top up and dilute them, with a cost and an
+  approximate lifetime estimate.
+- **Upload:** drag and drop a file, choose a batch, pin, encrypt, deferred
+  and redundancy. The progress shows up in Operations.
+- **Download:** fetch any reference.
+
+Every data action is recorded on the timeline.
+
+## Explain (right-click)
+
+Right-click a Bee term anywhere (overlay, depth, storage radius, pushsync,
+batch, bucket depth, and so on), or tap a dotted-underlined label. You get a
+**Simple** explanation (with an analogy) or an **Engineer** one (Bee
+internals and package paths). The **?** button in the top bar opens the
+whole glossary.
 
 ## Safety
 
@@ -73,7 +155,9 @@ The simulation scenario (scenario seconds, repeating):
   `k3d-*` or whose API server is not loopback, because the default kube
   context has pointed at a shared cluster before. `--allow-remote`
   overrides this; don't use it casually.
-- **Read-only polling.** Only cheap GET endpoints are polled.
+- **Read-only polling.** Only cheap GET endpoints are polled. The Cluster
+  and Data tabs change things only when you click a button, and
+  destructive ones ask first.
   `/status/peers`, `/status/neighborhoods`, `/debugstore`, `/rchash` and
   `/stewardship` are never polled, and the `/redistributionstate` PATCH is
   never called.
@@ -140,9 +224,10 @@ pkg/engine           single-goroutine state engine, SSE hub, operations
 pkg/anomaly          the 10 rules and the issue lifecycle
 pkg/history          bounded rings: events, keyframes, flows, logs, raw payloads
 pkg/component        registry of Bee subsystems and their data sources
-pkg/server           HTTP API (docs/API.md) and the embedded UI
+pkg/control          Cluster tab: docker / k3d / helm / beekeeper jobs, status, settings
+pkg/server           HTTP API (docs/API.md, docs/CONTROL-API.md) and the embedded UI
 web/                 React + TypeScript UI (Vite)
 ```
 
-Docs: [API](docs/API.md) · [Data sources](docs/DATA-SOURCES.md) ·
+Docs: [API](docs/API.md) · [Control and data API](docs/CONTROL-API.md) · [Data sources](docs/DATA-SOURCES.md) ·
 [Proposed Bee instrumentation](docs/INSTRUMENTATION.md)

@@ -4,6 +4,7 @@ import { num, statusLook } from "../format";
 import { Fresh, PhaseBadge, ProvBadge } from "../components/Badges";
 import { useReducedMotion } from "../hooks";
 import type { ComponentSpec, ComponentState } from "../types";
+import { Term } from "../components/Explain";
 
 const W = 1200;
 const H = 680;
@@ -84,7 +85,8 @@ export function NodeView() {
         {node.version && <span className="muted">v{node.version}</span>}
         {node.status && (
           <span>
-            radius {node.status.storageRadius} · depth {node.depth} · {node.connected} peers · pullsync {num(node.status.pullsyncRate)}/s
+            <Term id="storage-radius">radius</Term> {node.status.storageRadius} · <Term id="depth">depth</Term> {node.depth} · {node.connected} peers ·{" "}
+            <Term id="pullsync">pullsync</Term> {num(node.status.pullsyncRate)}/s
           </span>
         )}
         <span className={"logstream " + node.logStream} title="Pod log stream through the kube API">

@@ -1,0 +1,3 @@
+#!/bin/bash
+mkdir -p "$HOME/Library/Logs"
+exec "$(dirname "$0")/bee-scope" --open "$@" >>"$HOME/Library/Logs/bee-scope.log" 2>&1

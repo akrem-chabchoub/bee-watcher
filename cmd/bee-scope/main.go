@@ -16,13 +16,16 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"beescope/pkg/collect"
+	"beescope/pkg/control"
 	"beescope/pkg/engine"
 	"beescope/pkg/history"
 	"beescope/pkg/model"
@@ -50,6 +53,7 @@ type options struct {
 	devURL                             string
 	verbose                            bool
 	showVersion                        bool
+	open                               bool
 }
 
 func main() {
@@ -71,6 +75,7 @@ func main() {
 	flag.StringVar(&o.devURL, "dev-url", "http://127.0.0.1:5173", "Vite dev server used with --dev")
 	flag.BoolVar(&o.verbose, "v", false, "verbose logging")
 	flag.BoolVar(&o.showVersion, "version", false, "print the version and exit")
+	flag.BoolVar(&o.open, "open", false, "open the UI in the default browser once ready")
 	flag.Parse()
 	if o.showVersion {
 		fmt.Println("bee-scope", version)
@@ -122,6 +127,8 @@ func run(o options, log *slog.Logger) error {
 	ecfg := engine.Config{Intervals: iv, Log: log}
 	meta := server.Meta{Version: version, StartedAt: time.Now(), Logs: !o.noLogs, HistoryS: o.history.Seconds(), Intervals: intervalMap(iv)}
 	var nodes server.NodeAPI
+	var ctl *control.Controller
+	var eng *engine.Engine
 	var start []func()
 
 	switch {
@@ -155,7 +162,33 @@ func run(o options, log *slog.Logger) error {
 		nodes = col
 		meta.Actions = true
 		start = append(start, func() { col.Run(ctx) })
-		log.Info("observing cluster", "context", kc.Context, "server", kc.Server, "namespace", o.namespace)
+		if err := kc.Err(); err != nil {
+			log.Warn("cluster not reachable yet; open the Cluster tab to create or start it", "context", kc.Context, "error", err)
+		} else {
+			log.Info("observing cluster", "context", kc.Context, "server", kc.Server, "namespace", o.namespace)
+		}
+		stateDir, err := os.UserConfigDir()
+		if err != nil {
+			stateDir = os.TempDir()
+		}
+		ctl = control.New(control.Config{Kube: kc, KubeContext: kc.Context, Namespace: o.namespace, StateDir: filepath.Join(stateDir, "bee-scope"), Log: log,
+			OnJob: func(v control.JobView) {
+				if eng == nil {
+					return
+				}
+				sev, summary := model.SevInfo, "cluster job started: "+v.Title
+				switch v.State {
+				case control.JobSucceeded:
+					summary = "cluster job succeeded: " + v.Title
+				case control.JobFailed:
+					sev, summary = model.SevWarn, "cluster job failed: "+v.Title+": "+v.Error
+				case control.JobCanceled:
+					sev, summary = model.SevWarn, "cluster job canceled: "+v.Title
+				}
+				_ = eng.Record(context.WithoutCancel(ctx), model.Event{Kind: "control.job", Severity: sev, Provenance: model.Observed,
+					Source: model.Source{Adapter: "bee-scope", Ref: "job " + v.ID + " " + v.Action}, Summary: summary})
+			}})
+		start = append(start, func() { ctl.DefaultsFromDeployment(ctx) })
 		if o.otlpListen != "" {
 			ecfg.OTLP = o.otlpListen
 			otlpSrv := &http.Server{Addr: o.otlpListen, Handler: otlpMux(obs), ReadHeaderTimeout: 10 * time.Second}
@@ -175,7 +208,7 @@ func run(o options, log *slog.Logger) error {
 	lim.MaxKeyframes = max(int(o.history/(5*time.Second))+10, 10)
 	hist := history.New(lim)
 	hub := engine.NewHub()
-	eng := engine.New(ecfg, engIn, hist, hub)
+	eng = engine.New(ecfg, engIn, hist, hub)
 	go eng.Run(ctx)
 	for _, f := range start {
 		go f()
@@ -188,12 +221,19 @@ func run(o options, log *slog.Logger) error {
 	if _, err := fs.Stat(ui, "assets"); err != nil && !o.dev {
 		log.Warn("the embedded UI is not built; run `make web` and rebuild (the API works without it)")
 	}
-	scfg := server.Config{Engine: eng, Hist: hist, Hub: hub, Meta: meta, Nodes: nodes, UI: ui, Log: log}
+	scfg := server.Config{Engine: eng, Hist: hist, Hub: hub, Meta: meta, Nodes: nodes, Control: ctl, UI: ui, Log: log, Quit: stop}
 	if o.dev {
 		scfg.Dev = o.devURL
 	}
 	ln, err := net.Listen("tcp", o.listen)
 	if err != nil {
+		if o.open && errors.Is(err, syscall.EADDRINUSE) {
+			// Launched again from the app bundle: bee-scope is most likely
+			// already running, so just show it.
+			log.Info("address in use; opening the running bee-scope", "addr", o.listen)
+			openBrowser("http://" + o.listen)
+			return nil
+		}
 		return fmt.Errorf("listen: %w", err)
 	}
 	if host, _, _ := net.SplitHostPort(o.listen); !isLoopback(host) {
@@ -216,7 +256,11 @@ func run(o options, log *slog.Logger) error {
 	if mode == "sim" {
 		mode = "SIMULATION"
 	}
-	log.Info("bee-scope ready", "url", "http://"+ln.Addr().String(), "mode", mode, "version", version)
+	uiURL := "http://" + ln.Addr().String()
+	log.Info("bee-scope ready", "url", uiURL, "mode", mode, "version", version)
+	if o.open {
+		openBrowser(uiURL)
+	}
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -278,4 +322,17 @@ func intervalMap(iv collect.Intervals) map[string]float64 {
 		"metrics": iv.Metrics.Seconds(), "tags": iv.Tags.Seconds(), "stamps": iv.Stamps.Seconds(), "chainState": iv.ChainState.Seconds(),
 		"redistribution": iv.Redistribution.Seconds(),
 	}
+}
+
+func openBrowser(u string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", u)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", u)
+	default:
+		cmd = exec.Command("xdg-open", u)
+	}
+	_ = cmd.Start()
 }

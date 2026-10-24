@@ -506,6 +506,14 @@ export function TopologyView() {
         </div>
       )}
       {!selection && nodes.length > 0 && <div className="topo-hint">Click a node or link to inspect it</div>}
+      {view && nodes.length === 0 && (
+        <div className="topo-empty">
+          <div>No nodes discovered.</div>
+          <button className="btn primary" onClick={() => useStore.getState().setTab("cluster")}>
+            Open Cluster setup
+          </button>
+        </div>
+      )}
       <div className={"topo-legend" + (legendOpen ? "" : " closed")}>
         <button
           className="legend-toggle"

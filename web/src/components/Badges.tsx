@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { ago, classLook, isZeroTime, phaseLook, provLook, sevLook, statusLook, type Look } from "../format";
 import type { ComponentStatus, IssueClass, Phase, Provenance, Severity, Source } from "../types";
 
-function Badge({ look, title, compact }: { look: Look; title?: string; compact?: boolean }) {
+function Badge({ look, title, compact, term }: { look: Look; title?: string; compact?: boolean; term?: string }) {
   return (
-    <span className="badge" style={{ ["--c" as string]: look.color }} title={title ?? look.label}>
+    <span className="badge" style={{ ["--c" as string]: look.color }} title={title ?? look.label} data-term={term}>
       <span className="badge-icon" aria-hidden>
         {look.icon}
       </span>
@@ -14,14 +14,15 @@ function Badge({ look, title, compact }: { look: Look; title?: string; compact?:
 }
 
 export const ProvBadge = ({ prov, compact }: { prov: Provenance; compact?: boolean }) => (
-  <Badge look={provLook[prov] ?? provLook.observed} compact={compact} title={`provenance: ${prov}`} />
+  <Badge look={provLook[prov] ?? provLook.observed} compact={compact} title={`provenance: ${prov} (right-click to explain)`} term="provenance" />
 );
 export const SevBadge = ({ sev, compact }: { sev: Severity; compact?: boolean }) => (
   <Badge look={sevLook[sev] ?? sevLook.info} compact={compact} title={`severity: ${sev}`} />
 );
 export const StatusBadge = ({ status }: { status: ComponentStatus }) => <Badge look={statusLook[status] ?? statusLook.unknown} />;
-export const PhaseBadge = ({ phase }: { phase: Phase }) => <Badge look={phaseLook[phase] ?? phaseLook.unknown} />;
-export const ClassBadge = ({ cls }: { cls: IssueClass }) => <Badge look={classLook[cls] ?? classLook.hypothesis} />;
+const phaseTerm: Record<string, string> = { up: "phase-up", gated: "phase-gated", unreachable: "phase-unreachable" };
+export const PhaseBadge = ({ phase }: { phase: Phase }) => <Badge look={phaseLook[phase] ?? phaseLook.unknown} term={phaseTerm[phase]} />;
+export const ClassBadge = ({ cls }: { cls: IssueClass }) => <Badge look={classLook[cls] ?? classLook.hypothesis} term="issue-class" />;
 
 export function SourceTag({ source }: { source: Source }) {
   return (

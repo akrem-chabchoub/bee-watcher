@@ -136,11 +136,12 @@ func (c *Collector) discover(ctx context.Context) {
 	for _, n := range nodes {
 		seen[n.Name] = true
 		if w, ok := c.nodes[n.Name]; ok {
-			if w.info.Pod == n.Pod {
+			if w.info.Pod == n.Pod && w.info.BaseURL == n.BaseURL {
 				continue
 			}
-			// Pod replaced (restart, reschedule): restart the workers so
-			// the log follower attaches to the new pod.
+			// Pod replaced (restart, reschedule) or cluster recreated:
+			// restart the workers so the log follower attaches to the new
+			// pod and polls go to the new API server.
 			w.cancel()
 			<-w.done
 		}

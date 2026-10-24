@@ -4,6 +4,12 @@ import { useStore, useView } from "../store";
 import { ago, fmtTime } from "../format";
 import { ClassBadge, ProvBadge, SevBadge, SourceTag, useNow } from "../components/Badges";
 import type { Issue } from "../types";
+import { Term } from "../components/Explain";
+
+/** Replaces embedded Bee / kube JSON error bodies ({"code":503,"message":"…"}) with their message. */
+function tidyEvidence(t: string): string {
+  return t.replace(/\{"(?:kind|code|message)"[\s\S]*?"message":"((?:[^"\\]|\\.)*)"[\s\S]*?\}(?=\s|$)/g, (_, m: string) => `“${m.replace(/\\(.)/g, "$1")}”`);
+}
 
 export function issueMarkdown(is: Issue, target: string): string {
   const lines = [
@@ -81,7 +87,7 @@ export function IssueCard({ is, target }: { is: Issue; target: string }) {
                     {e.text}
                   </a>
                 ) : (
-                  <span className="ev-text">{e.text}</span>
+                  <span className="ev-text">{tidyEvidence(e.text)}</span>
                 )}{" "}
                 <span className="muted">{fmtTime(e.at)}</span>
               </li>
@@ -157,7 +163,7 @@ export function ProblemsView() {
           <input type="checkbox" checked={showResolved} onChange={(e) => setShowResolved(e.target.checked)} /> show resolved
         </label>
         <span className="muted">
-          ✔ confirmed = directly observed · ? suspicious = likely, check the evidence · ~ hypothesis = statistical hint
+          <Term id="issue-class">✔ confirmed</Term> = directly observed · ? suspicious = likely, check the evidence · ~ hypothesis = statistical hint
         </span>
         <div className="spacer" />
         {open.length > 0 && (

@@ -2,6 +2,8 @@ import { useState } from "react";
 import { api } from "../api";
 import { useStore } from "../store";
 import type { ActionResponse } from "../types";
+import { toast } from "../ui";
+import { friendly } from "../errors";
 
 interface ActionDef {
   name: string;
@@ -71,7 +73,11 @@ function ConfirmDialog({ def, node, onClose }: { def: ActionDef; node: string; o
     setBusy(true);
     api
       .action(def.name, { confirm: true, node, ...vals })
-      .then(setRes)
+      .then((r) => {
+        setRes(r);
+        if (r.ok) toast("ok", `${def.label} on ${node}: done`);
+        else toast("bad", `${def.label} on ${node} failed: ${friendly(r.error ?? `HTTP ${r.status}`).text}`, r.error);
+      })
       .catch((e: unknown) => setRes({ ok: false, status: 0, ms: 0, body: null, error: e instanceof Error ? e.message : String(e) }))
       .finally(() => setBusy(false));
   };

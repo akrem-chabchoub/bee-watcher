@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { api } from "./api";
 import type { BeeEvent, FlowFrame, Meta, Registry, Selection, Snapshot } from "./types";
 
-export type Tab = "topology" | "node" | "timeline" | "operations" | "problems";
+export type Tab = "topology" | "node" | "timeline" | "operations" | "problems" | "cluster" | "data";
 export type SSEState = "connecting" | "open" | "closed";
 
 const MAX_EVENTS = 5000;

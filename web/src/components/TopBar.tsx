@@ -2,13 +2,17 @@ import { useStore, useView } from "../store";
 import { fmtTime, num } from "../format";
 import { useNow } from "./Badges";
 import type { Tab } from "../store";
+import { useUI } from "../ui";
+import { QuitButton } from "./Feedback";
 
 const tabs: { id: Tab; label: string; short?: string; key: string }[] = [
-  { id: "topology", label: "Topology", key: "1" },
+  { id: "topology", label: "Topology", short: "Map", key: "1" },
   { id: "node", label: "Inside a node", short: "Node", key: "2" },
-  { id: "timeline", label: "Timeline", key: "3" },
-  { id: "operations", label: "Operations", key: "4" },
-  { id: "problems", label: "Problems", key: "5" },
+  { id: "timeline", label: "Timeline", short: "Time", key: "3" },
+  { id: "operations", label: "Operations", short: "Ops", key: "4" },
+  { id: "problems", label: "Problems", short: "Issues", key: "5" },
+  { id: "cluster", label: "Cluster", key: "6" },
+  { id: "data", label: "Data", key: "7" },
 ];
 
 export function TopBar() {
@@ -27,6 +31,7 @@ export function TopBar() {
   const setSearchOpen = useStore((s) => s.setSearchOpen);
   const view = useView();
   const now = useNow();
+  const setGlossaryOpen = useUI((s) => s.setGlossaryOpen);
 
   const mode = meta?.mode ?? live?.mode ?? "live";
   const age = liveAt ? now - liveAt : Infinity;
@@ -105,6 +110,9 @@ export function TopBar() {
       <button className="btn search-btn" onClick={() => setSearchOpen(true)} title="Search nodes, peers, chunks, batches, traces (⌘K)">
         ⌕ Search <kbd>⌘K</kbd>
       </button>
+      <button className="btn ghost icon-btn" onClick={() => setGlossaryOpen(true)} title="Glossary: what does this Bee term mean?" aria-label="Open glossary">
+        ?
+      </button>
       <div className={"conn " + (fresh ? "ok" : sse === "open" ? "warn" : "bad")} title={`stream: ${sse}`}>
         <span aria-hidden>{fresh ? "●" : sse === "open" ? "◐" : "✕"}</span>
         {sse === "open" ? (liveAt ? `snapshot ${age < 1500 ? "now" : Math.round(age / 1000) + " s ago"}` : "waiting…") : sse}
@@ -116,6 +124,7 @@ export function TopBar() {
           {c.logDropped > 0 && <span className="warn-text">⚠ {num(c.logDropped)} log drops</span>}
         </div>
       )}
+      <QuitButton />
     </header>
   );
 }

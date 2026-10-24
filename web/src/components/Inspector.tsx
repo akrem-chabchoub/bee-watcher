@@ -6,6 +6,8 @@ import { ago, fmtTime, isZeroTime, num, short, statusLook } from "../format";
 import { Fresh, PhaseBadge, ProvBadge, SevBadge, SourceTag, StatusBadge, useNow } from "./Badges";
 import { Actions } from "./Actions";
 import { Sparkline } from "./Sparkline";
+import { Term } from "./Explain";
+import { match as matchTerm } from "../glossary";
 import { IssueCard } from "../views/ProblemsView";
 import { OperationDetail } from "../views/OperationsView";
 import type { BeeEvent, NodeState, Selection, Snapshot } from "../types";
@@ -131,10 +133,18 @@ function ClusterSummary({ snap }: { snap: Snapshot }) {
   );
 }
 
+/** Wraps a label in <Term> when it names a glossary entry. */
+function Label({ text }: { text: string }) {
+  const g = matchTerm(text);
+  return g ? <Term id={g.id}>{text}</Term> : <>{text}</>;
+}
+
 function Row({ k, children }: { k: string; children: ReactNode }) {
   return (
     <div className="kv-row">
-      <span className="k">{k}</span>
+      <span className="k">
+        <Label text={k} />
+      </span>
       <span className="v">{children}</span>
     </div>
   );
@@ -144,7 +154,7 @@ function Section({ title, children, extra }: { title: string; children: ReactNod
   return (
     <section className="insp-section">
       <h4>
-        {title} {extra}
+        <Label text={title} /> {extra}
       </h4>
       {children}
     </section>

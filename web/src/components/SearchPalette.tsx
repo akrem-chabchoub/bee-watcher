@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { useStore } from "../store";
 import type { SearchResult, Selection } from "../types";
+import { search as searchGlossary, type GlossaryEntry } from "../glossary";
+import { useUI } from "../ui";
+
+type Item = { kind: "glossary"; g: GlossaryEntry } | { kind: "result"; r: SearchResult };
 
 const typeIcon: Record<string, string> = {
   node: "⬢",
@@ -83,6 +87,15 @@ export function SearchPalette() {
 
   if (!open) return null;
 
+  const gl = q.trim().length >= 2 ? searchGlossary(q).slice(0, 3) : [];
+  const items: Item[] = [...gl.map((g) => ({ kind: "glossary" as const, g })), ...results.map((r) => ({ kind: "result" as const, r }))];
+
+  const pick = (it: Item) => {
+    if (it.kind === "result") return choose(it.r);
+    setOpen(false);
+    useUI.getState().openExplain(it.g.id, Math.max(16, window.innerWidth / 2 - 180), window.innerHeight * 0.2);
+  };
+
   const choose = (r: SearchResult) => {
     const st = useStore.getState();
     const { sel, tab } = selectionFor(r, st.internalsNode);
@@ -97,32 +110,43 @@ export function SearchPalette() {
         <input
           ref={input}
           value={q}
-          placeholder="Node, peer overlay, component, chunk / batch address, trace or tag id…"
+          placeholder="Node, peer, component, chunk / batch address, trace, tag — or a Bee term…"
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Escape") setOpen(false);
             else if (e.key === "ArrowDown") {
               e.preventDefault();
-              setIdx((i) => Math.min(i + 1, results.length - 1));
+              setIdx((i) => Math.min(i + 1, items.length - 1));
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
               setIdx((i) => Math.max(i - 1, 0));
-            } else if (e.key === "Enter" && results[idx]) choose(results[idx]);
+            } else if (e.key === "Enter" && items[idx]) pick(items[idx]);
           }}
         />
         <ul className="palette-results">
           {err && <li className="muted">search failed: {err}</li>}
-          {!err && q.trim() && results.length === 0 && <li className="muted">no match</li>}
-          {results.map((r, i) => (
-            <li key={r.type + r.id} className={i === idx ? "on" : ""} onMouseEnter={() => setIdx(i)} onClick={() => choose(r)}>
-              <span className="ptype" aria-hidden>
-                {typeIcon[r.type] ?? "•"}
-              </span>
-              <span className="plabel">{r.label}</span>
-              <span className="ptag">{r.type}</span>
-              {r.detail && <span className="pdetail">{r.detail}</span>}
-            </li>
-          ))}
+          {!err && q.trim() && items.length === 0 && <li className="muted">no match</li>}
+          {items.map((it, i) =>
+            it.kind === "glossary" ? (
+              <li key={"g:" + it.g.id} className={i === idx ? "on" : ""} onMouseEnter={() => setIdx(i)} onClick={() => pick(it)}>
+                <span className="ptype" aria-hidden>
+                  💡
+                </span>
+                <span className="plabel">{it.g.term}</span>
+                <span className="ptag">glossary</span>
+                <span className="pdetail">{it.g.kid}</span>
+              </li>
+            ) : (
+              <li key={it.r.type + it.r.id} className={i === idx ? "on" : ""} onMouseEnter={() => setIdx(i)} onClick={() => pick(it)}>
+                <span className="ptype" aria-hidden>
+                  {typeIcon[it.r.type] ?? "•"}
+                </span>
+                <span className="plabel">{it.r.label}</span>
+                <span className="ptag">{it.r.type}</span>
+                {it.r.detail && <span className="pdetail">{it.r.detail}</span>}
+              </li>
+            ),
+          )}
         </ul>
         <div className="palette-hint muted">↑↓ to move · Enter to open · Esc to close</div>
       </div>

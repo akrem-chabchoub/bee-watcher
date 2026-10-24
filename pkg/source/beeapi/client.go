@@ -266,3 +266,23 @@ func (c *Client) Request(ctx context.Context, method, path string, hdr http.Head
 	}
 	return resp.StatusCode, body, nil
 }
+
+// Do sends a request with a body and returns the response unread, for
+// streaming uploads and downloads. size is the body length, or -1 when
+// unknown. The caller closes the response body. Use it only for explicit
+// user actions, never for polling.
+func (c *Client) Do(ctx context.Context, method, path string, hdr http.Header, body io.Reader, size int64) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if size >= 0 {
+		req.ContentLength = size
+	}
+	for k, vs := range hdr {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	return c.hc.Do(req)
+}

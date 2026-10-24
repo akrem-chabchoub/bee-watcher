@@ -27,6 +27,17 @@ records what exists, the decisions made while building, and what to do next.
 | tests | logs (parse, classify, fuzz), otlp (decode, gzip handler, fuzz), history, record round trip, kube guard, anomaly rule table + tracker, engine full-scenario test (every scripted fault opens its issue in its window), server (SSE resume/gap/live, actions, host check, UI) |
 | docs | `README.md`, `docs/API.md`, `docs/DATA-SOURCES.md` (with Bee file:line), `docs/INSTRUMENTATION.md` |
 
+**Added later the same day: cluster control, data tools, Explain, app bundle.**
+
+| Path | State |
+|---|---|
+| `pkg/control` | Cluster tab backend. Status probes: tools, `docker info`, `k3d cluster list`, registry, statefulsets and pods through client-go. One-at-a-time jobs with steps, a log ring and cancel (process-group kill). Actions are listed in `docs/CONTROL-API.md`. Cluster create mirrors beelocal `k8s-local` but with explicit contexts and `--kubeconfig-switch-context=false`, and never runs sudo or `/etc/hosts` edits. Deploy writes `<UserConfigDir>/bee-scope/beekeeper-config/` (a copy of the user's config dir plus `zz-bee-scope.yaml`, which defines cluster `bee-scope` inheriting the chosen profile, with counts and an image override through `bee-scope-<ng>` node groups). It then runs `beekeeper create bee-cluster --kubeconfig <single-context file>` and deletes nodes above the counts by label `app.kubernetes.io/instance`. The registry port comes from `docker port` (the user's is 5002) |
+| `pkg/server/control.go`, `data.go` | `/api/control/*`, `/api/data/*`, and `POST /api/quit`. Data: a read-only GET passthrough with an allowlist; stamp buy, top-up and dilute; upload (needs the `X-Bee-Scope: upload` header plus a same-origin check) streams to `/bzz`; download streams back. All of them record `action.data` events |
+| `pkg/source/kube` | the client now reconnects: missing context or unreachable API at startup is not fatal (the guard still is). Calls reset the connection on connection or x509 errors; `Reset()` is called after cluster create, start and delete. The collector restarts workers when a node's BaseURL changes |
+| `cmd/bee-scope` | `--open`. When the port is already in use and `--open` is set, it opens the browser on the running instance. The controller exists only in live mode |
+| `Makefile` | `make app` builds `dist/BeeScope.app`, a background launcher (`LSUIElement`) running `bee-scope --open` and logging to `~/Library/Logs/bee-scope.log`. `make install-app` copies it to `~/Applications` |
+| `web/` | Cluster and Data tabs, a right-click Explain glossary (Simple / Engineer), toasts, getting-started guidance, and a Quit button |
+
 **Changes to earlier code:**
 - engine: only `/health` lifts `unknown` (unless health polling is disabled).
 - engine: keeps serving after its input closes (end of a replay).

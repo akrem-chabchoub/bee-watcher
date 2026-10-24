@@ -20,6 +20,7 @@ import (
 
 	"beescope/pkg/anomaly"
 	"beescope/pkg/component"
+	"beescope/pkg/control"
 	"beescope/pkg/engine"
 	"beescope/pkg/history"
 	"beescope/pkg/model"
@@ -51,15 +52,21 @@ type Config struct {
 	Hub    *engine.Hub
 	Meta   Meta
 	Nodes  NodeAPI // nil disables actions
-	UI     fs.FS   // built UI (web/dist); nil serves nothing at /
-	Dev    string  // when set, non-API requests are proxied here (Vite)
-	Log    *slog.Logger
+	// Control runs the local cluster (live mode only; nil disables the
+	// Cluster and Data tabs).
+	Control *control.Controller
+	UI      fs.FS // built UI (web/dist); nil serves nothing at /
+	// Quit stops bee-scope (POST /api/quit); nil disables it.
+	Quit func()
+	Dev  string // when set, non-API requests are proxied here (Vite)
+	Log  *slog.Logger
 }
 
 // Server serves the API and the UI.
 type Server struct {
-	cfg Config
-	mux *http.ServeMux
+	cfg     Config
+	mux     *http.ServeMux
+	uploads uploads
 }
 
 // New builds the handler tree.
@@ -86,6 +93,21 @@ func New(cfg Config) *Server {
 	m.HandleFunc("GET /api/search", s.search)
 	m.HandleFunc("GET /api/export", s.export)
 	m.HandleFunc("POST /api/actions/{name}", s.action)
+	m.HandleFunc("POST /api/quit", s.quit)
+	m.HandleFunc("GET /api/control/status", s.controlStatus)
+	m.HandleFunc("GET /api/control/settings", s.controlSettings)
+	m.HandleFunc("PUT /api/control/settings", s.controlPutSettings)
+	m.HandleFunc("POST /api/control/actions/{name}", s.controlAction)
+	m.HandleFunc("GET /api/control/jobs", s.controlJobs)
+	m.HandleFunc("GET /api/control/jobs/{id}/log", s.controlJobLog)
+	m.HandleFunc("POST /api/control/jobs/{id}/cancel", s.controlJobCancel)
+	m.HandleFunc("GET /api/data/uploads", s.dataUploads)
+	m.HandleFunc("GET /api/data/{node}/get", s.dataGet)
+	m.HandleFunc("POST /api/data/{node}/stamps", s.dataBuyStamp)
+	m.HandleFunc("POST /api/data/{node}/stamps/{id}/topup", s.dataTopup)
+	m.HandleFunc("POST /api/data/{node}/stamps/{id}/dilute", s.dataDilute)
+	m.HandleFunc("POST /api/data/{node}/upload", s.dataUpload)
+	m.HandleFunc("GET /api/data/{node}/download/{ref}", s.dataDownload)
 	m.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { httpError(w, http.StatusNotFound, "unknown API route") })
 	m.Handle("/", s.ui())
 	return s
