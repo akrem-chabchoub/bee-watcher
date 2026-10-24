@@ -341,8 +341,8 @@ func pullsyncStall(in *Input) []Finding {
 		if !ok || rate.V <= 0 {
 			continue
 		}
-		d, span, ok := ns[SSyncedHist].Delta(in.Now, 3*time.Minute)
-		if !ok || span < 2*time.Minute || d > 0 {
+		d, span, ok := ns[SSyncedHist].Delta(in.Now, 2*time.Minute)
+		if !ok || span < 100*time.Second || d > 0 {
 			continue
 		}
 		workers, _ := ns[SPullerWorkers].Last()
@@ -350,7 +350,7 @@ func pullsyncStall(in *Input) []Finding {
 			Key: "pullsync-stall:" + n.Name, Rule: "pullsync-stall", Class: model.Suspicious, Severity: model.SevWarn,
 			Title: fmt.Sprintf("%s historical sync is not progressing", n.Name), Nodes: []string{n.Name}, Components: []string{"puller", "pullsync", "reserve"},
 			Since: in.Now.Add(-span),
-			What:  "The node reports it is still catching up (pullsyncRate > 0), but no historical chunk was synced in the last 3 minutes.",
+			What:  "The node reports it is still catching up (pullsyncRate > 0), but no historical chunk was synced in the last 2 minutes.",
 			Where: n.Name,
 			Evidence: []model.Evidence{
 				ev(fmt.Sprintf("pullsyncRate=%.2f chunks/s (10 min window, 0 means synced)", rate.V), n.Name, apiSrc("GET /status"), model.Observed, rate.T),
@@ -502,7 +502,9 @@ func outlier(in *Input) []Finding {
 		node string
 		v    float64
 	}
-	check := func(name, label, comp string, vals []sample, lowIsBad bool) []Finding {
+	// minAbs keeps a tight cluster (tiny stddev) from turning a difference
+	// of one peer or one log line into an outlier.
+	check := func(name, label, comp string, vals []sample, lowIsBad bool, minAbs float64) []Finding {
 		if len(vals) < 4 {
 			return nil
 		}
@@ -521,6 +523,9 @@ func outlier(in *Input) []Finding {
 		var out []Finding
 		for _, s := range vals {
 			z := (s.v - mean) / sd
+			if math.Abs(s.v-mean) < minAbs {
+				continue
+			}
 			if (lowIsBad && z < -2.2) || (!lowIsBad && z > 2.2) {
 				out = append(out, Finding{
 					Key: "outlier:" + s.node + ":" + name, Rule: "outlier", Class: model.Hypothesis, Severity: model.SevInfo,
@@ -545,8 +550,8 @@ func outlier(in *Input) []Finding {
 			errs = append(errs, sample{n.Name, d})
 		}
 	}
-	out := check("connected_peers", "connected peers", "kademlia", peers, true)
-	out = append(out, check("log_errors_5m", "error log lines (5 min)", "api", errs, false)...)
+	out := check("connected_peers", "connected peers", "kademlia", peers, true, 2)
+	out = append(out, check("log_errors_5m", "error log lines (5 min)", "api", errs, false, 10)...)
 	return out
 }
 

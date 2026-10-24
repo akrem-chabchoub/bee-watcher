@@ -7,7 +7,7 @@
 //	 60–120 s  upload burst on bee-1 (tag, pusher counters, "chunk pushed" logs, traces)
 //	120–180 s  retrieval failures on bee-2
 //	150–210 s  peer flapping on bee-4 (with bee-5 and bee-7)
-//	150–330 s  historical pullsync stall and storage radius divergence on bee-6
+//	150–330 s  storage radius divergence on bee-6; its historical sync stalls after 20 s
 //	240–270 s  bee-3 unreachable, then restarts (counters reset)
 //
 // The scenario drives the engine only through observations; it never
@@ -62,6 +62,8 @@ type Options struct {
 	Speed     float64
 	Intervals collect.Intervals
 	Seed      uint64
+	// Now is the clock (default time.Now). Tests drive Step with a fake one.
+	Now func() time.Time
 }
 
 type mkey struct{ name, labels string }
@@ -99,6 +101,9 @@ func New(opt Options) *Sim {
 	if opt.Speed <= 0 {
 		opt.Speed = 1
 	}
+	if opt.Now == nil {
+		opt.Now = time.Now
+	}
 	s := &Sim{opt: opt, rng: rand.New(rand.NewPCG(opt.Seed, 0x5eed)), byName: map[string]*node{}, block: 1000, nextUID: 1}
 	names := []string{"bootnode-0", "bee-1", "bee-2", "bee-3", "bee-4", "bee-5", "bee-6", "bee-7"}
 	for i, name := range names {
@@ -115,6 +120,9 @@ func New(opt Options) *Sim {
 	}
 	for _, n := range s.nodes {
 		s.initMetrics(n)
+		// Connections made before the simulation started; a restart resets
+		// this to zero, which is how the engine detects restarts.
+		n.ctr[mkey{"bee_libp2p_created_connection_count", ""}] = float64(20 + 3*n.idx)
 	}
 	up := s.byName[uploader]
 	up.stamp = &model.Stamp{BatchID: s.randHex(32), Usable: true, Label: "sim", Depth: 20, BucketDepth: 16, Exists: true, BatchTTL: 7 * 24 * 3600}
@@ -141,12 +149,11 @@ func (s *Sim) randHex(n int) string {
 
 // Run emits observations until ctx ends.
 func (s *Sim) Run(ctx context.Context, out chan<- model.Observation) {
-	s.out = out
 	step := time.Duration(float64(time.Second) / s.opt.Speed)
 	t := time.NewTicker(step)
 	defer t.Stop()
 	for {
-		s.step(ctx)
+		s.Step(ctx, out)
 		select {
 		case <-ctx.Done():
 			return
@@ -166,8 +173,10 @@ func (s *Sim) emit(ctx context.Context, o model.Observation) {
 	}
 }
 
-func (s *Sim) step(ctx context.Context) {
-	s.now = time.Now()
+// Step advances the scenario by one second and emits what is due.
+func (s *Sim) Step(ctx context.Context, out chan<- model.Observation) {
+	s.out = out
+	s.now = s.opt.Now()
 	t := s.tick % Loop
 	if s.tick == 0 {
 		for _, n := range s.nodes {
@@ -239,8 +248,14 @@ func (s *Sim) scenario(ctx context.Context, t int) {
 	if stall.in(t) {
 		st.radius = 1
 		st.gauge[mkey{"bee_puller_worker", ""}] = 4
-		st.ctr[mkey{"bee_puller_worker_errors", ""}] += 0.25
-		if t%4 == 0 {
+		// The new radius starts a historical sync that makes progress for
+		// 20 s and then stops while pullsyncRate still says "catching up".
+		if t < stall.from+20 {
+			st.ctr[mkey{"bee_puller_synced_chunks", "type=historical"}] += 4
+		} else {
+			st.ctr[mkey{"bee_puller_worker_errors", ""}] += 0.25
+		}
+		if t >= stall.from+20 && t%4 == 0 {
 			p := s.peerOf(st)
 			s.log(ctx, st, "debug", "puller", "syncWorker interval failed", 1, "peer_address", p.overlay, "bin", "1", "error", "context deadline exceeded")
 		}
@@ -376,7 +391,6 @@ func (s *Sim) initMetrics(n *node) {
 	n.ctr[mkey{"bee_puller_synced_chunks", "type=live"}] = 0
 	n.ctr[mkey{"bee_localstore_method_calls", "method=get,status=success"}] = 0
 	n.ctr[mkey{"bee_localstore_method_calls", "method=put,status=failure"}] = 0
-	n.ctr[mkey{"bee_libp2p_created_connection_count", ""}] = float64(len(s.nodes) - 1)
 	for _, name := range []string{
 		"bee_puller_worker", "bee_puller_pullsync_rate", "bee_localstore_reserve_size", "bee_localstore_reserve_size_within_radius", "bee_localstore_storage_radius",
 		"bee_localstore_cache_size", "bee_localstore_evicted_count", "bee_kademlia_currently_connected_peers", "bee_kademlia_current_depth", "bee_kademlia_current_storage_depth",
@@ -526,7 +540,6 @@ func (s *Sim) retrievalTrace(ctx context.Context, r *node) {
 	root := s.span(r, tid, "", "bytes-download", t0, t0.Add(820*time.Millisecond), map[string]string{"http.method": "GET"})
 	root.StatusError, root.StatusMsg = true, "joiner: retrieval failed"
 	get := s.span(r, tid, root.SpanID, "get-chunk", t0.Add(10*time.Millisecond), t0.Add(810*time.Millisecond), map[string]string{"swarm.chunk.address": ch})
-	get.StatusError, get.StatusMsg = true, "storage: not found"
 	ret := s.span(r, tid, get.SpanID, "retrieve-chunk", t0.Add(20*time.Millisecond), t0.Add(800*time.Millisecond), map[string]string{"swarm.chunk.address": ch})
 	ret.StatusError, ret.StatusMsg = true, "context deadline exceeded"
 	h := s.span(p, tid, ret.SpanID, "handle-retrieve-chunk", t0.Add(60*time.Millisecond), t0.Add(560*time.Millisecond), map[string]string{"swarm.chunk.address": ch})
@@ -652,7 +665,7 @@ func (s *Sim) topology(n *node) *model.Topology {
 	}
 	sort.Slice(t.Peers, func(i, j int) bool { return t.Peers[i].Address < t.Peers[j].Address })
 	for d := 31; d >= 0; d-- {
-		if t.BinConnected[d] > 0 {
+		if t.BinPopulation[d] > 0 {
 			t.Depth = uint8(min(d, 2))
 			break
 		}
@@ -669,7 +682,7 @@ func (s *Sim) redistribution(n *node) *model.Redistribution {
 	healthy := !(n.name == staller && stall.in(s.tick%Loop))
 	return &model.Redistribution{
 		IsFullySynced: healthy, IsHealthy: healthy, HasSufficientFunds: true, Enabled: true, Phase: phase, Round: round,
-		LastPlayedRound: round - 1, LastSelectedRound: round - uint64(1+n.idx%3), LastSampleDurationS: 1.2, Block: s.block,
+		LastPlayedRound: round - 1, LastSelectedRound: round - (round+uint64(n.idx))%8, LastSampleDurationS: 1.2, Block: s.block,
 	}
 }
 

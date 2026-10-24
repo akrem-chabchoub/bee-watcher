@@ -457,8 +457,9 @@ func (e *Engine) onHealth(n *nodeRT, o model.Observation) {
 
 func (e *Engine) onStatus(n *nodeRT, o model.Observation) {
 	s, prev := o.Status, n.st.Status
-	// Only /health moves a node out of unknown; a good /status ends gating.
-	if n.st.Phase == model.PhaseGated {
+	// Only /health moves a node out of unknown (unless /health polling is
+	// disabled); a good /status ends gating.
+	if n.st.Phase == model.PhaseGated || (n.st.Phase == model.PhaseUnknown && e.cfg.Intervals.Health <= 0) {
 		e.setPhase(n, model.PhaseUp, "", o.ObservedAt, o.Source, model.Observed)
 	}
 	if s.Overlay != "" && s.Overlay != n.st.Overlay {

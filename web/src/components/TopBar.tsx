@@ -3,9 +3,9 @@ import { fmtTime, num } from "../format";
 import { useNow } from "./Badges";
 import type { Tab } from "../store";
 
-const tabs: { id: Tab; label: string; key: string }[] = [
+const tabs: { id: Tab; label: string; short?: string; key: string }[] = [
   { id: "topology", label: "Topology", key: "1" },
-  { id: "node", label: "Inside a node", key: "2" },
+  { id: "node", label: "Inside a node", short: "Node", key: "2" },
   { id: "timeline", label: "Timeline", key: "3" },
   { id: "operations", label: "Operations", key: "4" },
   { id: "problems", label: "Problems", key: "5" },
@@ -87,7 +87,14 @@ export function TopBar() {
             onClick={() => setTab(t.id)}
             title={`${t.label} (${t.key})`}
           >
-            {t.label}
+            {t.short ? (
+              <>
+                <span className="tab-long">{t.label}</span>
+                <span className="tab-short">{t.short}</span>
+              </>
+            ) : (
+              t.label
+            )}
             {t.id === "problems" && issues.length > 0 && (
               <span className={"count" + (issuesBad ? " bad" : "")}>{issues.length}</span>
             )}

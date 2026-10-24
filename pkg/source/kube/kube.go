@@ -103,7 +103,8 @@ func guard(ctxName, host string) error {
 	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
 		return nil
 	}
-	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
+	// k3d sometimes writes 0.0.0.0, which also only ever dials this machine.
+	if ip := net.ParseIP(h); ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
 		return nil
 	}
 	return fmt.Errorf("%w: API server %q is not loopback (use --allow-remote to override)", ErrNotLocal, host)

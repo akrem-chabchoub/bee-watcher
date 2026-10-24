@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { api } from "../api";
 import { flowBus, useIsLive, useStore, useView } from "../store";
 import { num, phaseLook, protoColor, short } from "../format";
 import type { Edge, Flow, NodeState, Snapshot } from "../types";
@@ -39,19 +40,49 @@ function overlayAngle(hex: string): number | null {
   return (parseInt(m[0], 16) / 65536) * Math.PI * 2 - Math.PI / 2;
 }
 
+// spreadAngles pushes ring neighbours apart until each pair is at least minSep
+// radians apart, keeping their order: nodes with nearby overlays (common in a
+// small cluster) stay recognisably close without drawing on top of each other.
+function spreadAngles(items: { a: number }[], minSep: number) {
+  const n = items.length;
+  if (n < 2) return;
+  const TAU = Math.PI * 2;
+  items.sort((x, y) => x.a - y.a);
+  for (let pass = 0; pass < 60; pass++) {
+    let moved = false;
+    for (let i = 0; i < n; i++) {
+      const cur = items[i];
+      const next = items[(i + 1) % n];
+      let gap = next.a - cur.a;
+      if (i === n - 1) gap += TAU;
+      if (gap < minSep) {
+        const push = (minSep - gap) / 2;
+        cur.a -= push;
+        next.a += push;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+}
+
 function layout(snap: Snapshot | null, w: number, h: number, extNames: string[]) {
   const pos = new Map<string, P>();
   const ext = new Map<string, P>();
   if (!snap) return { pos, ext, cx: w / 2, cy: h / 2, r: 100 };
-  const cx = w / 2;
   const cy = h / 2;
   const r = Math.max(60, Math.min(w, h) / 2 - 90);
+  // Keep the ring clear of the legend (top-left, ~470 px) when there is room.
+  const legendW = 470;
+  let cx = w / 2;
+  if (cx - r - 70 < legendW && w - legendW >= 2 * r + 140) cx = legendW + (w - legendW) / 2;
   const nodes = Object.values(snap.nodes).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  nodes.forEach((n, i) => {
+  const placed = nodes.map((n, i) => {
     const oa = n.overlay ? overlayAngle(n.overlay) : null;
-    const a = oa ?? (i / Math.max(1, nodes.length)) * Math.PI * 2 - Math.PI / 2;
-    pos.set(n.name, { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+    return { name: n.name, a: oa ?? (i / Math.max(1, nodes.length)) * Math.PI * 2 - Math.PI / 2 };
   });
+  spreadAngles(placed, Math.min((Math.PI * 2) / Math.max(1, placed.length), 0.45) * 0.8);
+  for (const p of placed) pos.set(p.name, { x: cx + r * Math.cos(p.a), y: cy + r * Math.sin(p.a) });
   extNames.forEach((name, i) => {
     const a = overlayAngle(name) ?? (i / Math.max(1, extNames.length)) * Math.PI * 2;
     ext.set(name, { x: cx + (r + 55) * Math.cos(a), y: cy + (r + 55) * Math.sin(a) });
@@ -87,6 +118,18 @@ export function TopologyView() {
   const extSeen = useRef<Map<string, number>>(new Map()); // ext peer -> last seen ms
   const edgeCounts = useRef<Map<string, { n: number; err: number; proto: string }>>(new Map());
   const [extVersion, setExtVersion] = useState(0);
+  // When the view is not live, flows come from history around the view time.
+  const pastCounts = useRef<Map<string, { n: number; err: number; proto: string }> | null>(null);
+  const [legendOpen, setLegendOpen] = useState(() => {
+    try {
+      const v = localStorage.getItem("bee-scope.legend");
+      if (v !== null) return v !== "0";
+    } catch {
+      /* storage unavailable */
+    }
+    // The legend covers most of a phone-sized ring, so start it closed there.
+    return window.innerWidth >= 700;
+  });
 
   useEffect(() => {
     const el = wrap.current;
@@ -163,6 +206,31 @@ export function TopologyView() {
     };
   }, []);
 
+  const viewAt = view ? Date.parse(view.at) : 0;
+  useEffect(() => {
+    if (live || !viewAt) {
+      pastCounts.current = null;
+      return;
+    }
+    const ac = new AbortController();
+    api
+      .flows(viewAt - 15_000, viewAt, ac.signal)
+      .then((frames) => {
+        const m = new Map<string, { n: number; err: number; proto: string }>();
+        for (const f of frames)
+          for (const fl of f.flows) {
+            const k = fl.from + ">" + fl.to;
+            const v = m.get(k) ?? { n: 0, err: 0, proto: fl.protocol };
+            v.n += fl.count;
+            v.err += fl.errors;
+            m.set(k, v);
+          }
+        pastCounts.current = m;
+      })
+      .catch(() => undefined);
+    return () => ac.abort();
+  }, [live, viewAt]);
+
   const extNames = useMemo(() => [...extSeen.current.keys()].sort(), [extVersion]); // eslint-disable-line react-hooks/exhaustive-deps
   const geo = useMemo(() => layout(view, size.w, size.h, extNames), [view, size.w, size.h, extNames]);
   const state = useRef({ view, geo, selection });
@@ -238,7 +306,8 @@ export function TopologyView() {
       // static counts (reduced motion) or when not live
       if (reducedRef.current || !liveRef.current) {
         g.font = "10px system-ui";
-        for (const [k, v] of edgeCounts.current) {
+        const counts = !liveRef.current && pastCounts.current ? pastCounts.current : edgeCounts.current;
+        for (const [k, v] of counts) {
           if (v.n < 0.5) continue;
           const [f, to] = k.split(">");
           const a = L.pos.get(f) ?? L.ext.get(f);
@@ -357,13 +426,13 @@ export function TopologyView() {
     if (!snap) return {};
     for (const n of Object.values(snap.nodes)) {
       const p = L.pos.get(n.name);
-      if (p && Math.hypot(p.x - x, p.y - y) < 18) return { node: n };
+      if (p && Math.hypot(p.x - x, p.y - y) < 22) return { node: n };
     }
-    for (const [name, p] of L.ext) if (Math.hypot(p.x - x, p.y - y) < 7) return { ext: name };
+    for (const [name, p] of L.ext) if (Math.hypot(p.x - x, p.y - y) < 10) return { ext: name };
     for (const e of snap.edges ?? []) {
       const a = L.pos.get(e.a);
       const b = L.pos.get(e.b);
-      if (a && b && distToSeg({ x, y }, a, b) < 5) return { edge: e };
+      if (a && b && distToSeg({ x, y }, a, b) < 7) return { edge: e };
     }
     return {};
   };
@@ -381,6 +450,7 @@ export function TopologyView() {
     <div className="view topo" ref={wrap}>
       <canvas
         ref={canvas}
+        className={hover ? "over" : ""}
         onMouseMove={(ev) => {
           const { x, y } = pt(ev);
           const h = hit(x, y);
@@ -426,15 +496,31 @@ export function TopologyView() {
         }}
       />
       {hover && (
-        <div className="tooltip" style={{ left: Math.min(hover.x + 14, size.w - 300), top: hover.y + 14 }}>
+        <div className="tooltip" style={{ left: Math.max(4, Math.min(hover.x + 14, size.w - 300)), top: hover.y + 14 }}>
           {hover.text.map((l, i) => (
             <div key={i} className={i === 0 ? "tt-title" : ""}>
               {l}
             </div>
           ))}
+          <div className="tt-hint">click to inspect</div>
         </div>
       )}
-      <div className="topo-legend">
+      {!selection && nodes.length > 0 && <div className="topo-hint">Click a node or link to inspect it</div>}
+      <div className={"topo-legend" + (legendOpen ? "" : " closed")}>
+        <button
+          className="legend-toggle"
+          onClick={() => {
+            setLegendOpen(!legendOpen);
+            try {
+              localStorage.setItem("bee-scope.legend", legendOpen ? "0" : "1");
+            } catch {
+              /* storage unavailable */
+            }
+          }}
+          title={legendOpen ? "hide legend" : "show legend"}
+        >
+          {legendOpen ? "▾" : "▸ legend"}
+        </button>
         <div>
           <b>
             {counts.up}/{nodes.length}
@@ -462,7 +548,7 @@ export function TopologyView() {
             ? "Reduced motion: flows are shown as counts."
             : live
               ? "Dots travel only for observed per-peer events (logs/spans). Pulses are metric activity."
-              : "Paused: flows shown as recent counts."}
+              : "Not live: per-edge flows of the 15 s before the view time, as counts."}
         </div>
       </div>
     </div>

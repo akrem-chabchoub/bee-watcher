@@ -133,7 +133,7 @@ export function TimelineStrip() {
             </span>
           ))}
         </span>
-        <span className="muted">click/drag to scrub · shift-drag to set the Timeline range</span>
+        <span className="muted strip-hint">click/drag to scrub · shift-drag to set the Timeline range</span>
         {gap && (
           <span className="warn-text" title="Events older than the retained history were dropped while the stream was disconnected">
             ⚠ stream gap: events {gap.requested + 1}–{gap.oldest - 1} were evicted
