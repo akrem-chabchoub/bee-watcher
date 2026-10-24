@@ -2,9 +2,11 @@ package control
 
 import (
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,6 +16,10 @@ import (
 // ManagedCluster is the beekeeper cluster bee-scope generates and deploys.
 const ManagedCluster = "bee-scope"
 
+// SelectionCluster is ManagedCluster narrowed to the nodes chosen for one
+// beekeeper command, so commands can target single nodes.
+const SelectionCluster = "bee-scope-selection"
+
 const staleAfter = 10 * time.Second
 
 // Profile is a beekeeper cluster definition that targets the local
@@ -22,6 +28,16 @@ type Profile struct {
 	Name   string         `json:"name"`
 	Groups []ProfileGroup `json:"groups"`
 	Image  string         `json:"image"`
+	// Funding is what beekeeper sends each node when it creates the
+	// cluster (the profile's funding: eth, bzz).
+	Funding struct {
+		ETH float64 `json:"eth"`
+		BZZ float64 `json:"bzz"`
+	} `json:"funding"`
+	// RequiredBZZ is the largest swap-initial-deposit of the profile's
+	// node groups, in BZZ: a node with less cannot deploy its chequebook
+	// and does not start.
+	RequiredBZZ float64 `json:"requiredBzz"`
 }
 
 // ProfileGroup is one node group of a profile.
@@ -34,9 +50,11 @@ type ProfileGroup struct {
 // bkConfig is the merged content of a beekeeper config dir, kept as plain
 // maps so unknown fields survive into the generated file.
 type bkConfig struct {
-	clusters   map[string]map[string]any
-	nodeGroups map[string]map[string]any
-	checks     []string
+	clusters    map[string]map[string]any
+	nodeGroups  map[string]map[string]any
+	beeConfigs  map[string]map[string]any
+	checks      []string
+	simulations []string
 }
 
 func readBKConfig(dir string) (*bkConfig, error) {
@@ -44,7 +62,7 @@ func readBKConfig(dir string) (*bkConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	bc := &bkConfig{clusters: map[string]map[string]any{}, nodeGroups: map[string]map[string]any{}}
+	bc := &bkConfig{clusters: map[string]map[string]any{}, nodeGroups: map[string]map[string]any{}, beeConfigs: map[string]map[string]any{}}
 	seenCheck := map[string]bool{}
 	for _, f := range files {
 		b, err := os.ReadFile(f)
@@ -65,10 +83,21 @@ func readBKConfig(dir string) (*bkConfig, error) {
 				bc.nodeGroups[k] = asMap(v)
 			}
 		}
+		for k, v := range asMap(doc["bee-configs"]) {
+			if _, dup := bc.beeConfigs[k]; !dup {
+				bc.beeConfigs[k] = asMap(v)
+			}
+		}
 		for k := range asMap(doc["checks"]) {
 			if !seenCheck[k] {
 				seenCheck[k] = true
 				bc.checks = append(bc.checks, k)
+			}
+		}
+		for k := range asMap(doc["simulations"]) {
+			if !seenCheck["sim:"+k] {
+				seenCheck["sim:"+k] = true
+				bc.simulations = append(bc.simulations, k)
 			}
 		}
 	}
@@ -79,6 +108,7 @@ func readBKConfig(dir string) (*bkConfig, error) {
 		}
 		return bc.checks[i] < bc.checks[j]
 	})
+	sort.Strings(bc.simulations)
 	return bc, nil
 }
 
@@ -141,7 +171,14 @@ func (bc *bkConfig) profile(name string) (Profile, bool) {
 		if cfg, _ := g["config"].(string); cfg != "" && p.Image == "" {
 			p.Image, _ = lookup(bc.nodeGroups, cfg, "image").(string)
 		}
+		if bcName, _ := g["bee-config"].(string); bcName != "" {
+			if dep := plurToBZZ(lookup(bc.beeConfigs, bcName, "swap-initial-deposit")); dep > p.RequiredBZZ {
+				p.RequiredBZZ = dep
+			}
+		}
 	}
+	f := asMap(lookup(bc.clusters, name, "funding"))
+	p.Funding.ETH, p.Funding.BZZ = toFloat(f["eth"]), toFloat(f["bzz"])
 	sort.Slice(p.Groups, func(i, j int) bool {
 		if (p.Groups[i].Mode == "bootnode") != (p.Groups[j].Mode == "bootnode") {
 			return p.Groups[i].Mode == "bootnode"
@@ -149,6 +186,33 @@ func (bc *bkConfig) profile(name string) (Profile, bool) {
 		return p.Groups[i].Name < p.Groups[j].Name
 	})
 	return p, true
+}
+
+func toFloat(v any) float64 {
+	switch x := v.(type) {
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case float64:
+		return x
+	case string:
+		f, _ := strconv.ParseFloat(x, 64)
+		return f
+	}
+	return 0
+}
+
+// plurToBZZ converts a PLUR amount (1 BZZ = 1e16 PLUR) to BZZ.
+func plurToBZZ(v any) float64 {
+	if s, ok := v.(string); ok {
+		if b, ok := new(big.Float).SetString(s); ok {
+			f, _ := new(big.Float).Quo(b, big.NewFloat(1e16)).Float64()
+			return f
+		}
+		return 0
+	}
+	return toFloat(v) / 1e16
 }
 
 func toInt(v any) int {
@@ -177,13 +241,16 @@ func (c *Controller) profilesAndChecks() ([]Profile, []string) {
 	profiles, checks := []Profile{}, []string{}
 	if bc, err := readBKConfig(dir); err == nil {
 		checks = bc.checks
+		c.mu.Lock()
+		c.simulations = bc.simulations
+		c.mu.Unlock()
 		names := make([]string, 0, len(bc.clusters))
 		for n := range bc.clusters {
 			names = append(names, n)
 		}
 		sort.Strings(names)
 		for _, n := range names {
-			if ns, _ := lookup(bc.clusters, n, "namespace").(string); ns != c.cfg.Namespace || n == ManagedCluster {
+			if ns, _ := lookup(bc.clusters, n, "namespace").(string); ns != c.ns() || n == ManagedCluster {
 				continue
 			}
 			if p, ok := bc.profile(n); ok {
@@ -202,6 +269,8 @@ type Plan struct {
 	Profile string
 	Counts  map[string]int // non-bootnode groups
 	Image   string
+	// Only, when set, also defines SelectionCluster with just these nodes.
+	Only []string
 }
 
 // writeManagedConfig copies the user's beekeeper config dir into the state
@@ -273,9 +342,15 @@ func (c *Controller) writeManagedConfig(pl Plan) (dir string, groups map[string]
 		}
 		ngs[gname] = g
 	}
-	doc := map[string]any{
-		"clusters": map[string]any{ManagedCluster: map[string]any{"_inherit": pl.Profile, "node-groups": ngs}},
+	clusters := map[string]any{ManagedCluster: map[string]any{"_inherit": pl.Profile, "node-groups": ngs}}
+	if len(pl.Only) > 0 {
+		sel, err := selectNodes(ngs, pl.Only)
+		if err != nil {
+			return "", nil, err
+		}
+		clusters[SelectionCluster] = map[string]any{"_inherit": pl.Profile, "node-groups": sel}
 	}
+	doc := map[string]any{"clusters": clusters}
 	if len(extraNG) > 0 {
 		doc["node-groups"] = extraNG
 	}
@@ -288,4 +363,59 @@ func (c *Controller) writeManagedConfig(pl Plan) (dir string, groups map[string]
 		return "", nil, err
 	}
 	return dir, groups, nil
+}
+
+// selectNodes narrows node groups to the named nodes: bootnode groups keep
+// their matching explicit entries (with keys), other groups list the nodes
+// by name instead of a count.
+func selectNodes(ngs map[string]any, only []string) (map[string]any, error) {
+	want := map[string]bool{}
+	for _, n := range only {
+		want[n] = true
+	}
+	out := map[string]any{}
+	for gname, gv := range ngs {
+		g := asMap(gv)
+		var keep []any
+		if nodes, ok := g["nodes"].([]any); ok && len(nodes) > 0 {
+			for i, nv := range nodes {
+				name, _ := asMap(nv)["name"].(string)
+				if name == "" {
+					name = fmt.Sprintf("%s-%d", gname, i)
+				}
+				if want[name] {
+					keep = append(keep, nv)
+					delete(want, name)
+				}
+			}
+		} else {
+			for i := 0; i < toInt(g["count"]); i++ {
+				name := fmt.Sprintf("%s-%d", gname, i)
+				if want[name] {
+					keep = append(keep, map[string]any{"name": name})
+					delete(want, name)
+				}
+			}
+		}
+		if len(keep) == 0 {
+			continue
+		}
+		ng := map[string]any{}
+		for k, v := range g {
+			ng[k] = v
+		}
+		delete(ng, "count")
+		delete(ng, "endpoints")
+		ng["nodes"] = keep
+		out[gname] = ng
+	}
+	if len(want) > 0 {
+		var missing []string
+		for n := range want {
+			missing = append(missing, n)
+		}
+		sort.Strings(missing)
+		return nil, fmt.Errorf("not part of the deployed layout: %s (deploy from the Cluster tab first)", strings.Join(missing, ", "))
+	}
+	return out, nil
 }

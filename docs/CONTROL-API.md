@@ -159,3 +159,46 @@ Can take a minute (Bee waits for the transaction).
 
 `GET /api/data/{node}/download/{reference}?path=<optional file path>&name=<save-as>`
 streams Bee's `GET /bzz/{reference}/{path}` back with `Content-Disposition: attachment`.
+
+`GET /api/data/{node}/probe/{reference}?path=<optional>` retrieves the content through that node and discards it:
+`{"node": "bee-3", "reference": "…", "ok": true, "status": 200, "bytes": 1234, "ms": 85}` or `{"ok": false, "error": "…"}`.
+The Data tab uses it for the "check retrieval on all nodes" matrix. Every probe is recorded on the timeline.
+
+`POST /api/control/actions/beekeeper` runs one beekeeper command for the whole cluster (`nodes` empty) or for chosen
+nodes (bee-scope generates a `bee-scope-selection` cluster with just those nodes):
+
+| `command` | fields |
+|---|---|
+| `check` | `checks` [string], `seed`, `timeout` |
+| `simulate` | `simulations` [string], `seed`, `timeout` |
+| `print` | `what`: addresses, depths, nodes, overlays, peers, topologies |
+| `stamper-create` | `depth` (17–40), `duration` (e.g. 24h), `label` |
+| `stamper-topup` | `ttlThreshold`, `topupTo`, `batchIds` |
+| `stamper-dilute` | `usageThreshold` (%), `dilutionDepth` (levels), `batchIds` |
+| `node-funder` | `minNative` (ETH), `minSwarm` (BZZ) |
+| `restart` | `image` (optional) |
+
+Every value is validated and typed; nothing is passed to beekeeper verbatim. `check-run` remains as an alias of `command: check`.
+
+The beekeeper action also takes:
+- `cluster`: an explicit `--cluster-name`. Allowed values are `bee-scope`, `bee-scope-selection` (needs `nodes`), or any profile in the config dir for the watched namespace.
+- `raw`: a hand-edited command line that replaces `command` and the typed fields. The rules:
+  - It is split shell-style, and no shell runs.
+  - A leading `$` and `beekeeper` are optional.
+  - Allowed subcommands: check, simulate, print, stamper, node-funder, fund, restart, nuke, create, delete, version.
+  - `--kubeconfig`, `--in-cluster`, `--config`, `--config-dir`, `--config-git-*` and `--enable-k8s` are refused, because bee-scope supplies them.
+  - `check` and `simulate` default to `--metrics-enabled=false`.
+
+## Kubernetes context
+
+`GET /api/control/contexts` returns:
+
+```json
+{"current": {"context": "k3d-bee", "namespace": "local"}, "allowRemote": false,
+ "contexts": [{"name": "k3d-bee", "server": "https://127.0.0.1:61954", "local": true, "current": true, "reason": ""}]}
+```
+
+`POST /api/control/context` takes `{"context": "k3d-other", "namespace": "local", "confirm": true}`. It switches what bee-scope observes and controls, and is refused while a job runs.
+
+- A context must pass the local-cluster guard (a `k3d-*` name and a loopback API server) unless bee-scope was started with `--allow-remote`.
+- The choice is saved and reopened on the next start, unless `--context` or `--namespace` is given on the command line.

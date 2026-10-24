@@ -76,3 +76,9 @@ func (e *Engine) Overlays(ctx context.Context) (map[string]string, error) {
 func (e *Engine) Record(ctx context.Context, ev model.Event) error {
 	return e.Do(ctx, func() { e.add(ev) })
 }
+
+// SetTarget changes the target label shown in snapshots (after the user
+// switched the kube context).
+func (e *Engine) SetTarget(ctx context.Context, target string) error {
+	return e.Do(ctx, func() { e.cfg.Target = target })
+}

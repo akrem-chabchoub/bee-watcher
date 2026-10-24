@@ -163,6 +163,13 @@ func TestDataEndpoints(t *testing.T) {
 		t.Fatalf("bad reference: %d", code)
 	}
 
+	if code, body := get("/probe/" + strings.Repeat("c", 64)); code != 200 || !strings.Contains(body, `"ok":true`) || !strings.Contains(body, `"bytes":11`) {
+		t.Fatalf("probe: %d %s", code, body)
+	}
+	if code, body := get("/probe/" + strings.Repeat("c", 64) + "?path=../x"); code != 400 {
+		t.Fatalf("probe traversal: %d %s", code, body)
+	}
+
 	if evs := e.hist.Events(history.Filter{Kinds: []string{"action.data"}}); len(evs) < 3 {
 		t.Fatalf("data actions must be on the timeline, got %d", len(evs))
 	}

@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { useControl } from "../control";
 import { usePoll } from "../hooks";
 import { useStore } from "../store";
 import { dur, fmtTime, short } from "../format";
-import type { BeeStamp, Upload } from "../types";
+import type { BeeStamp, ProbeResult, Upload } from "../types";
 import { Term } from "../components/Explain";
 import { ErrorNote, Skeleton } from "../components/Feedback";
 import { toast } from "../ui";
@@ -102,7 +102,8 @@ export function DataView() {
     () => Object.values(live?.nodes ?? {}).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
     [live],
   );
-  const [node, setNode] = useState<string>("");
+  const node = useStore((s) => s.dataNode) ?? "";
+  const setNode = (n: string) => useStore.getState().setDataNode(n);
   // Prefer a full or light node that is up; bootnodes cannot hold stamps usefully.
   const fallback =
     names.find((n) => n.group !== "bootnode" && n.phase === "up")?.name ??
@@ -155,9 +156,9 @@ export function DataView() {
       <div className="data-grid">
         <NodeCard node={current} />
         <StampsCard node={current} version={stampsVersion} bump={() => setStampsVersion((v) => v + 1)} />
-        <UploadCard node={current} stampsVersion={stampsVersion} />
-        <DownloadCard node={current} />
-        <UploadsCard node={current} />
+        <UploadCard node={current} names={names} stampsVersion={stampsVersion} />
+        <DownloadCard node={current} names={names} />
+        <UploadsCard node={current} names={names} />
       </div>
     </div>
   );
@@ -517,7 +518,29 @@ interface UploadResult {
   upload?: Upload;
 }
 
-function UploadCard({ node, stampsVersion }: { node: string; stampsVersion: number }) {
+type NodeName = { name: string; phase: string; group?: string };
+
+/** A compact node picker used inside cards. */
+function NodePick({ value, onChange, names, label, disabled }: { value: string; onChange: (v: string) => void; names: NodeName[]; label: string; disabled?: boolean }) {
+  return (
+    <label className="node-pick">
+      <span className="muted small">{label}</span>{" "}
+      <select value={value} onChange={(e) => onChange(e.target.value)} disabled={disabled}>
+        {names.map((n) => (
+          <option key={n.name} value={n.name}>
+            {n.name}
+            {n.phase !== "up" ? ` (${n.phase})` : ""}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function UploadCard({ node: pageNode, names, stampsVersion }: { node: string; names: NodeName[]; stampsVersion: number }) {
+  const [target, setTarget] = useState<string | null>(null);
+  const node = target && names.some((n) => n.name === target) ? target : pageNode;
+  useEffect(() => setTarget(null), [pageNode]);
   const stamps = usePoll((s) => api.data.get<{ stamps: BeeStamp[] | null }>(node, "/stamps", s), [node, stampsVersion], 10_000);
   const usable = (stamps.data?.stamps ?? []).filter((b) => b.usable);
   const [batch, setBatch] = useState("");
@@ -577,8 +600,10 @@ function UploadCard({ node, stampsVersion }: { node: string; stampsVersion: numb
     <section className="card">
       <div className="card-head">
         <h2>⇪ Upload</h2>
-        <span className="muted small">to {node}</span>
+        <div className="spacer" />
+        <NodePick label="to" value={node} onChange={setTarget} names={names} disabled={progress !== null} />
       </div>
+      {node !== pageNode && <p className="muted small">Uses {node}&apos;s own postage batches; the stamps card above shows {pageNode}.</p>}
       <div
         className={"dropzone" + (drag ? " over" : "") + (file ? " has-file" : "")}
         onDragOver={(e) => {
@@ -762,29 +787,37 @@ function TagProgress({ node, uid }: { node: string; uid: number }) {
 
 // ---- Download ----
 
-function DownloadCard({ node }: { node: string }) {
+function DownloadCard({ node: pageNode, names }: { node: string; names: NodeName[] }) {
+  const [from, setFrom] = useState<string | null>(null);
+  const node = from && names.some((n) => n.name === from) ? from : pageNode;
+  useEffect(() => setFrom(null), [pageNode]);
   const [ref, setRef] = useState("");
   const [path, setPath] = useState("");
-  const clean = ref.trim().replace(/^bzz:\/\//, "");
-  const valid = /^[0-9a-fA-F]{64}([0-9a-fA-F]{64})?$/.test(clean);
+  const [matrix, setMatrix] = useState<string | null>(null);
+  const clean = ref.trim().replace(/^bzz:\/\//, "").toLowerCase();
+  const valid = /^[0-9a-f]{64}([0-9a-f]{64})?$/.test(clean);
   return (
     <section className="card">
       <div className="card-head">
         <h2>⇩ Download</h2>
         <span className="muted small">by reference</span>
+        <div className="spacer" />
+        <NodePick label="from" value={node} onChange={setFrom} names={names} />
       </div>
-      <p className="muted small">Fetches through {node}: if the content is not local, the node retrieves it from the network.</p>
+      <p className="muted small">
+        Fetches through {node}: if the content is not stored there, the node <Term id="retrieval">retrieves</Term> it from the network. Check all nodes to see who can get it.
+      </p>
       <label className="field">
         <span>
           <Term id="reference">Reference</Term>
         </span>
-        <input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="64 or 128 hex characters" spellCheck={false} />
+        <input value={ref} onChange={(e) => (setRef(e.target.value), setMatrix(null))} placeholder="64 or 128 hex characters" spellCheck={false} />
       </label>
       <label className="field">
         <span>
           Path in <Term id="manifest">manifest</Term> <span className="muted small">(optional)</span>
         </span>
-        <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="index.html" spellCheck={false} />
+        <input value={path} onChange={(e) => (setPath(e.target.value), setMatrix(null))} placeholder="index.html" spellCheck={false} />
       </label>
       <div className="row">
         {valid ? (
@@ -796,20 +829,102 @@ function DownloadCard({ node }: { node: string }) {
             ⇩ Download
           </button>
         )}
+        <button className="btn" disabled={!valid} onClick={() => setMatrix(clean + "|" + path.trim())} title="Retrieve through every reachable node and report which ones succeed">
+          ◎ Check all nodes
+        </button>
         {ref && !valid && <span className="warn-text small">not a Swarm reference</span>}
       </div>
+      {matrix && <RetrievalMatrix key={matrix} reference={clean} path={path.trim()} names={names} />}
     </section>
+  );
+}
+
+/** Retrieves a reference through every node (4 at a time) and shows who can get it. */
+function RetrievalMatrix({ reference, path, names, origin }: { reference: string; path: string; names: NodeName[]; origin?: string }) {
+  const [res, setRes] = useState<Record<string, ProbeResult | "pending" | "skipped">>({});
+  const [run, setRun] = useState(0);
+  useEffect(() => {
+    const ac = new AbortController();
+    // Gated nodes answer (they are syncing or warming up); only nodes that
+    // cannot be reached at all are skipped.
+    const reachable = (n: NodeName) => n.phase !== "unreachable";
+    const targets = names.filter(reachable).map((n) => n.name);
+    const init: Record<string, ProbeResult | "pending" | "skipped"> = {};
+    for (const n of names) init[n.name] = reachable(n) ? "pending" : "skipped";
+    setRes(init);
+    let i = 0;
+    const worker = async () => {
+      while (i < targets.length && !ac.signal.aborted) {
+        const n = targets[i++];
+        try {
+          const r = await api.data.probe(n, reference, path, ac.signal);
+          setRes((v) => ({ ...v, [n]: r }));
+        } catch (e) {
+          if (ac.signal.aborted) return;
+          setRes((v) => ({ ...v, [n]: { node: n, reference, ok: false, ms: 0, error: e instanceof Error ? e.message : String(e) } }));
+        }
+      }
+    };
+    void Promise.all([worker(), worker(), worker(), worker()]);
+    return () => ac.abort();
+  }, [reference, path, names.length, run]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const vals = Object.values(res);
+  const done = vals.filter((v) => typeof v === "object").length;
+  const okN = vals.filter((v) => typeof v === "object" && v.ok).length;
+  const pending = vals.filter((v) => v === "pending").length;
+  return (
+    <div className="matrix">
+      <div className="matrix-head">
+        <b>Retrieval check</b>
+        <span className="muted small">
+          {pending ? `checking… ${done}/${done + pending}` : `${okN} of ${done} nodes retrieved it`}
+        </span>
+        <div className="spacer" />
+        {!pending && (
+          <button className="btn ghost" onClick={() => setRun((r) => r + 1)}>
+            ↻ again
+          </button>
+        )}
+      </div>
+      <div className="matrix-grid">
+        {names.map((n) => {
+          const r = res[n.name];
+          const cls = r === "pending" ? "pending" : r === "skipped" || r === undefined ? "skipped" : r.ok ? "ok" : "bad";
+          const text =
+            r === "pending"
+              ? "…"
+              : r === "skipped" || r === undefined
+                ? `skipped (${n.phase})`
+                : r.ok
+                  ? `✔ ${r.ms} ms · ${fmtBytes(r.bytes ?? 0)}`
+                  : `✕ ${friendly(r.error ?? "failed").text}`;
+          return (
+            <div key={n.name} className={"matrix-cell " + cls} title={typeof r === "object" && !r.ok ? r.error : undefined}>
+              <span className="matrix-node">
+                {n.name}
+                {origin === n.name ? <span className="muted"> · uploaded here</span> : null}
+              </span>
+              <span className="matrix-res">{text}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
 // ---- Uploads list ----
 
-function UploadsCard({ node }: { node: string }) {
+function UploadsCard({ node, names }: { node: string; names: NodeName[] }) {
   const { data, error } = usePoll((s) => api.data.uploads(s), [], 5000);
   const list = data ?? [];
+  const [via, setVia] = useState<Record<string, string>>({});
+  const [check, setCheck] = useState<string | null>(null);
   return (
     <section className="card span2">
       <h2>Uploads this session</h2>
+      <p className="muted small">Download any upload from any node, or check which nodes can retrieve it.</p>
       {error && <ErrorNote error={error} />}
       {list.length === 0 ? (
         <div className="muted">Nothing uploaded through bee-scope yet.</div>
@@ -821,36 +936,58 @@ function UploadsCard({ node }: { node: string }) {
                 <th>time</th>
                 <th>file</th>
                 <th>size</th>
-                <th>node</th>
+                <th>uploaded to</th>
                 <th>reference</th>
+                <th>download from</th>
                 <th />
               </tr>
             </thead>
             <tbody>
-              {list.map((u) => (
-                <tr key={u.id} className="static">
-                  <td className="mono">{fmtTime(u.at)}</td>
-                  <td>
-                    {u.name}
-                    {u.encrypt ? " 🔒" : ""}
-                  </td>
-                  <td className="num">{fmtBytes(u.size)}</td>
-                  <td>{u.node}</td>
-                  <td className="mono">
-                    {short(u.reference, 12)} <Copy text={u.reference} />
-                  </td>
-                  <td className="row-actions">
-                    <a className="btn" href={api.data.downloadURL(u.node, u.reference, "", u.name)} title={`download via ${u.node}`}>
-                      ⇩ {u.node}
-                    </a>
-                    {u.node !== node && (
-                      <a className="btn" href={api.data.downloadURL(node, u.reference, "", u.name)} title={`retrieve through ${node} (tests retrieval)`}>
-                        ⇩ via {node}
-                      </a>
+              {list.map((u) => {
+                const from = via[u.id] ?? (u.node !== node ? node : u.node);
+                return (
+                  <Fragment key={u.id}>
+                    <tr className="static">
+                      <td className="mono">{fmtTime(u.at)}</td>
+                      <td>
+                        {u.name}
+                        {u.encrypt ? " 🔒" : ""}
+                      </td>
+                      <td className="num">{fmtBytes(u.size)}</td>
+                      <td>{u.node}</td>
+                      <td className="mono">
+                        {short(u.reference, 12)} <Copy text={u.reference} />
+                      </td>
+                      <td>
+                        <select value={from} onChange={(e) => setVia((v) => ({ ...v, [u.id]: e.target.value }))} aria-label={`download ${u.name} from`}>
+                          {names.map((n) => (
+                            <option key={n.name} value={n.name}>
+                              {n.name}
+                              {n.name === u.node ? " (uploader)" : ""}
+                              {n.phase !== "up" ? ` (${n.phase})` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="row-actions">
+                        <a className="btn" href={api.data.downloadURL(from, u.reference, "", u.name)} title={from === u.node ? `download from the uploader ${u.node}` : `retrieve through ${from} (tests retrieval from the network)`}>
+                          ⇩ Download
+                        </a>
+                        <button className={"btn" + (check === u.id ? " on" : "")} onClick={() => setCheck(check === u.id ? null : u.id)} title="Retrieve through every reachable node">
+                          ◎ Check all nodes
+                        </button>
+                      </td>
+                    </tr>
+                    {check === u.id && (
+                      <tr className="static">
+                        <td colSpan={7}>
+                          <RetrievalMatrix reference={u.reference} path="" names={names} origin={u.node} />
+                        </td>
+                      </tr>
                     )}
-                  </td>
-                </tr>
-              ))}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

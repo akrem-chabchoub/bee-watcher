@@ -328,17 +328,10 @@ func (s *Server) dataDownload(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "reference must be 64 or 128 hex characters")
 		return
 	}
-	p := "/bzz/" + ref + "/"
-	if sub := strings.Trim(r.URL.Query().Get("path"), "/"); sub != "" {
-		var segs []string
-		for _, seg := range strings.Split(sub, "/") {
-			if seg == "" || seg == "." || seg == ".." {
-				httpError(w, http.StatusBadRequest, "invalid path")
-				return
-			}
-			segs = append(segs, url.PathEscape(seg))
-		}
-		p += strings.Join(segs, "/")
+	p, err := bzzPath(ref, r.URL.Query().Get("path"))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
@@ -374,4 +367,68 @@ func (s *Server) dataDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	n, _ := io.Copy(w, resp.Body)
 	s.recordData(r, node, model.SevInfo, "download "+short(ref), fmt.Sprintf("user action: downloaded %s… (%s)", short(ref), humanBytes(n)))
+}
+
+// dataProbe retrieves a reference through one node and discards the
+// content, to answer "can this node get it?" without a browser download.
+func (s *Server) dataProbe(w http.ResponseWriter, r *http.Request) {
+	cl, node, ok := s.dataClient(w, r)
+	if !ok {
+		return
+	}
+	ref := strings.ToLower(r.PathValue("ref"))
+	if !refRe.MatchString(ref) {
+		httpError(w, http.StatusBadRequest, "reference must be 64 or 128 hex characters")
+		return
+	}
+	p, err := bzzPath(ref, r.URL.Query().Get("path"))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	start := time.Now()
+	out := map[string]any{"node": node, "reference": ref}
+	resp, err := cl.Do(ctx, http.MethodGet, p, nil, nil, -1)
+	if err != nil {
+		out["ok"], out["error"], out["ms"] = false, err.Error(), time.Since(start).Milliseconds()
+		writeJSON(w, out)
+		return
+	}
+	defer resp.Body.Close()
+	out["status"] = resp.StatusCode
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		out["ok"], out["error"], out["ms"] = false, beeMessage(body), time.Since(start).Milliseconds()
+	} else {
+		n, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<30))
+		out["bytes"], out["ms"] = n, time.Since(start).Milliseconds()
+		out["ok"] = err == nil
+		if err != nil {
+			out["error"] = err.Error()
+		}
+	}
+	sev, verdict := model.SevInfo, "retrieved"
+	if out["ok"] != true {
+		sev, verdict = model.SevWarn, fmt.Sprintf("could not retrieve (%v)", out["error"])
+	}
+	s.recordData(r, node, sev, "probe "+short(ref), fmt.Sprintf("user check: %s %s %s… in %d ms", node, verdict, short(ref), out["ms"]))
+	writeJSON(w, out)
+}
+
+// bzzPath builds /bzz/<ref>/<escaped path>, refusing traversal.
+func bzzPath(ref, sub string) (string, error) {
+	p := "/bzz/" + ref + "/"
+	if sub = strings.Trim(sub, "/"); sub != "" {
+		var segs []string
+		for _, seg := range strings.Split(sub, "/") {
+			if seg == "" || seg == "." || seg == ".." {
+				return "", fmt.Errorf("invalid path")
+			}
+			segs = append(segs, url.PathEscape(seg))
+		}
+		p += strings.Join(segs, "/")
+	}
+	return p, nil
 }

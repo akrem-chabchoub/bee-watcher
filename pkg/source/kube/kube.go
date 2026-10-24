@@ -107,6 +107,8 @@ func (c *Client) Err() error {
 	return c.loadErr
 }
 
+// load builds a connection for the current options. Callers hold c.mu,
+// except New, which runs before the client is shared.
 func (c *Client) load() (*conn, string, error) {
 	rules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if c.opts.Kubeconfig != "" {
@@ -231,7 +233,10 @@ func guard(ctxName, host string) error {
 func (c *Client) HTTPClient() *http.Client { return c.http }
 
 // Namespace returns the watched namespace.
-func (c *Client) Namespace() string { return c.opts.Namespace }
+func (c *Client) Namespace() string {
+	_, ns := c.Target()
+	return ns
+}
 
 // Discover lists Bee API services and their pods.
 func (c *Client) Discover(ctx context.Context) ([]model.NodeInfo, error) {
@@ -239,14 +244,15 @@ func (c *Client) Discover(ctx context.Context) ([]model.NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	svcs, err := cn.cs.CoreV1().Services(c.opts.Namespace).List(ctx, metav1.ListOptions{LabelSelector: c.opts.Selector})
+	ns := c.Namespace()
+	svcs, err := cn.cs.CoreV1().Services(ns).List(ctx, metav1.ListOptions{LabelSelector: c.opts.Selector})
 	if err != nil {
 		if ctx.Err() == nil {
 			c.Reset()
 		}
 		return nil, fmt.Errorf("list services: %w", err)
 	}
-	pods, err := cn.cs.CoreV1().Pods(c.opts.Namespace).List(ctx, metav1.ListOptions{LabelSelector: c.opts.Selector})
+	pods, err := cn.cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: c.opts.Selector})
 	if err != nil {
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
@@ -261,7 +267,7 @@ func (c *Client) Discover(ctx context.Context) ([]model.NodeInfo, error) {
 		if strings.HasSuffix(s.Name, "-headless") || !hasPort(&s, "api") {
 			continue
 		}
-		base := strings.TrimRight(cn.cfg.Host, "/") + fmt.Sprintf("/api/v1/namespaces/%s/services/%s:api/proxy", c.opts.Namespace, s.Name)
+		base := strings.TrimRight(cn.cfg.Host, "/") + fmt.Sprintf("/api/v1/namespaces/%s/services/%s:api/proxy", ns, s.Name)
 		out = append(out, model.NodeInfo{Name: s.Name, Pod: podFor[s.Name], Group: groupOf(s.Name), BaseURL: base})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -301,9 +307,89 @@ func (c *Client) FollowLogs(ctx context.Context, pod string, since time.Duration
 	if err != nil {
 		return nil, err
 	}
-	rc, err := cn.cs.CoreV1().Pods(c.opts.Namespace).GetLogs(pod, opts).Stream(ctx)
+	rc, err := cn.cs.CoreV1().Pods(c.Namespace()).GetLogs(pod, opts).Stream(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("follow logs %s: %w", pod, err)
 	}
 	return rc, nil
+}
+
+// ContextInfo describes a kubeconfig context.
+type ContextInfo struct {
+	Name    string `json:"name"`
+	Server  string `json:"server"`
+	Local   bool   `json:"local"`   // passes the local-cluster guard
+	Current bool   `json:"current"` // the kubeconfig's current-context
+	Reason  string `json:"reason"`  // why it is not local
+}
+
+// Contexts lists the kubeconfig's contexts. It never returns credentials.
+func (c *Client) Contexts() ([]ContextInfo, error) {
+	rules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if c.opts.Kubeconfig != "" {
+		rules.ExplicitPath = c.opts.Kubeconfig
+	}
+	raw, err := rules.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load kubeconfig: %w", err)
+	}
+	var out []ContextInfo
+	for name, kc := range raw.Contexts {
+		ci := ContextInfo{Name: name, Current: name == raw.CurrentContext}
+		if cl, ok := raw.Clusters[kc.Cluster]; ok {
+			ci.Server = cl.Server
+		}
+		if err := guard(name, ci.Server); err != nil {
+			ci.Reason = strings.TrimPrefix(err.Error(), ErrNotLocal.Error()+": ")
+		} else {
+			ci.Local = true
+		}
+		out = append(out, ci)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// Target returns the context and namespace in use.
+func (c *Client) Target() (kubeContext, namespace string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.opts.Context, c.opts.Namespace
+}
+
+// AllowRemote reports whether the local-cluster guard is disabled.
+func (c *Client) AllowRemote() bool { return c.opts.AllowRemote }
+
+// SetTarget switches to another context and namespace. The context must
+// exist and pass the local-cluster guard (unless AllowRemote).
+func (c *Client) SetTarget(kubeContext, namespace string) error {
+	if kubeContext == "" || namespace == "" {
+		return errors.New("context and namespace are required")
+	}
+	if !c.opts.AllowRemote && !strings.HasPrefix(kubeContext, "k3d-") {
+		return fmt.Errorf("%w: context %q is not a k3d context (start bee-scope with --allow-remote to allow it)", ErrNotLocal, kubeContext)
+	}
+	ctxs, err := c.Contexts()
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, ci := range ctxs {
+		if ci.Name == kubeContext {
+			found = true
+			if !ci.Local && !c.opts.AllowRemote {
+				return fmt.Errorf("%w: %s (start bee-scope with --allow-remote to allow it)", ErrNotLocal, ci.Reason)
+			}
+		}
+	}
+	if !found {
+		return fmt.Errorf("kube context %q not found", kubeContext)
+	}
+	c.mu.Lock()
+	c.opts.Context, c.opts.Namespace = kubeContext, namespace
+	c.Context = kubeContext
+	c.cur = nil
+	c.lastLoad = time.Time{}
+	c.mu.Unlock()
+	return nil
 }

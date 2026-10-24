@@ -188,6 +188,25 @@ func run(o options, log *slog.Logger) error {
 				_ = eng.Record(context.WithoutCancel(ctx), model.Event{Kind: "control.job", Severity: sev, Provenance: model.Observed,
 					Source: model.Source{Adapter: "bee-scope", Ref: "job " + v.ID + " " + v.Action}, Summary: summary})
 			}})
+		ctl.SetOnTarget(func(k, ns string) {
+			if eng != nil {
+				_ = eng.SetTarget(context.WithoutCancel(ctx), k+"/"+ns)
+			}
+			log.Info("switched cluster", "context", k, "namespace", ns)
+		})
+		// Reopen the cluster chosen in the UI last time, unless --context or
+		// --namespace was given explicitly.
+		if st := ctl.Settings(); st.KubeContext != "" && !flagSet("context") && !flagSet("namespace") && (st.KubeContext != kc.Context || st.Namespace != o.namespace) {
+			ns := st.Namespace
+			if ns == "" {
+				ns = o.namespace
+			}
+			if err := ctl.SetTarget(st.KubeContext, ns); err != nil {
+				log.Warn("could not reopen the last cluster; staying on the default", "context", st.KubeContext, "error", err)
+			} else {
+				ecfg.Target = st.KubeContext + "/" + ns
+			}
+		}
 		start = append(start, func() { ctl.DefaultsFromDeployment(ctx) })
 		if o.otlpListen != "" {
 			ecfg.OTLP = o.otlpListen
@@ -335,4 +354,15 @@ func openBrowser(u string) {
 		cmd = exec.Command("xdg-open", u)
 	}
 	_ = cmd.Start()
+}
+
+// flagSet reports whether a flag was given on the command line.
+func flagSet(name string) bool {
+	set := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			set = true
+		}
+	})
+	return set
 }

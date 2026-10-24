@@ -96,6 +96,8 @@ func New(cfg Config) *Server {
 	m.HandleFunc("POST /api/quit", s.quit)
 	m.HandleFunc("GET /api/control/status", s.controlStatus)
 	m.HandleFunc("GET /api/control/settings", s.controlSettings)
+	m.HandleFunc("GET /api/control/contexts", s.controlContexts)
+	m.HandleFunc("POST /api/control/context", s.controlSetContext)
 	m.HandleFunc("PUT /api/control/settings", s.controlPutSettings)
 	m.HandleFunc("POST /api/control/actions/{name}", s.controlAction)
 	m.HandleFunc("GET /api/control/jobs", s.controlJobs)
@@ -108,6 +110,7 @@ func New(cfg Config) *Server {
 	m.HandleFunc("POST /api/data/{node}/stamps/{id}/dilute", s.dataDilute)
 	m.HandleFunc("POST /api/data/{node}/upload", s.dataUpload)
 	m.HandleFunc("GET /api/data/{node}/download/{ref}", s.dataDownload)
+	m.HandleFunc("GET /api/data/{node}/probe/{ref}", s.dataProbe)
 	m.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { httpError(w, http.StatusNotFound, "unknown API route") })
 	m.Handle("/", s.ui())
 	return s
@@ -232,7 +235,14 @@ func filterFrom(q url.Values) (history.Filter, error) {
 	return f, nil
 }
 
-func (s *Server) meta(w http.ResponseWriter, r *http.Request) { writeJSON(w, s.cfg.Meta) }
+func (s *Server) meta(w http.ResponseWriter, r *http.Request) {
+	m := s.cfg.Meta
+	if s.cfg.Control != nil {
+		k, ns := s.cfg.Control.Target()
+		m.Target = k + "/" + ns
+	}
+	writeJSON(w, m)
+}
 
 func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 	writeRaw(w, s.cfg.Engine.SnapshotJSON())

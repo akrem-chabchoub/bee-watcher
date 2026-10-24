@@ -2443,3 +2443,151 @@ th .term {
     -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent);
   }
 }
+
+/* Beekeeper panel */
+.bk-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 8px 0 6px;
+}
+.bk-label {
+  width: 72px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.bk-nodes {
+  margin: 0 0 6px 82px;
+}
+.bk-help {
+  margin: 2px 0 8px 82px;
+  color: var(--muted);
+}
+.bk-fields {
+  margin-top: 8px;
+}
+.bk-preview {
+  margin: 10px 0 8px;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+@media (max-width: 700px) {
+  .bk-label {
+    width: 100%;
+  }
+  .bk-nodes,
+  .bk-help {
+    margin-left: 0;
+  }
+}
+
+/* Data: node pickers and retrieval matrix */
+.node-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.node-pick select {
+  max-width: 160px;
+}
+.matrix {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--bg);
+}
+.matrix-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.matrix-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 4px;
+}
+.matrix-cell {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--idle);
+  border-radius: 4px;
+  font-size: 12px;
+  min-width: 0;
+}
+.matrix-cell.ok {
+  border-left-color: var(--ok);
+}
+.matrix-cell.bad {
+  border-left-color: var(--bad);
+}
+.matrix-cell.pending {
+  border-left-style: dashed;
+  border-left-color: var(--active);
+}
+.matrix-cell.skipped {
+  opacity: 0.55;
+}
+.matrix-node {
+  font-weight: 600;
+}
+.matrix-res {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.matrix-cell.ok .matrix-res {
+  color: var(--ok);
+}
+.matrix-cell.bad .matrix-res {
+  color: var(--bad);
+}
+
+.bk-cmd {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 8px;
+}
+.bk-cmd-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.bk-cmd-row > .mono {
+  padding-top: 6px;
+}
+.bk-cmd textarea {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.bk-cmd textarea:focus {
+  border-color: var(--active);
+  outline: none;
+}
+.bk-cmd textarea.edited {
+  border-color: var(--warn);
+}
+
+.form-note {
+  grid-column: 1 / -1;
+  margin: 2px 0 4px;
+}

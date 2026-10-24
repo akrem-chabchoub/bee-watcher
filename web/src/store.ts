@@ -25,6 +25,8 @@ interface State {
   selection: Selection | null;
   tab: Tab;
   internalsNode: string | null;
+  /** Node the Data tab works with (null = pick a sensible default). */
+  dataNode: string | null;
   searchOpen: boolean;
   timelineSpanMs: number; // width of the timeline view window
 
@@ -37,6 +39,7 @@ interface State {
   select(s: Selection | null): void;
   setTab(t: Tab): void;
   setInternalsNode(n: string | null): void;
+  setDataNode(node: string | null, open?: boolean): void;
   setSearchOpen(o: boolean): void;
   togglePause(): void;
   goLive(): void;
@@ -67,6 +70,7 @@ export const useStore = create<State>((set, get) => ({
   selection: null,
   tab: "topology",
   internalsNode: null,
+  dataNode: null,
   searchOpen: false,
   timelineSpanMs: 5 * 60_000,
 
@@ -100,6 +104,7 @@ export const useStore = create<State>((set, get) => ({
   },
   setTab: (tab) => set({ tab }),
   setInternalsNode: (internalsNode) => set({ internalsNode }),
+  setDataNode: (dataNode, open = false) => set(open ? { dataNode, tab: "data" } : { dataNode }),
   setSearchOpen: (searchOpen) => set({ searchOpen }),
   togglePause: () => {
     const { paused, live, cursor } = get();

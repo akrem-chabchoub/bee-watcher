@@ -380,6 +380,11 @@ function NodeOverview({ n, snap }: { n: NodeState; snap: Snapshot }) {
         </table>
       </Section>
       <Section title="Actions">
+        <div className="row">
+          <button className="btn" onClick={() => useStore.getState().setDataNode(n.name, true)} title={`Open the Data tab on ${n.name}`}>
+            ⇅ Upload / download via {n.name}
+          </button>
+        </div>
         <Actions node={n.name} />
       </Section>
     </>

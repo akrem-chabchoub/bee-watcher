@@ -1,4 +1,6 @@
 import type {
+  ContextList,
+  ProbeResult,
   ActionResponse,
   BeeEvent,
   ControlSettings,
@@ -141,6 +143,8 @@ export const api = {
   control: {
     status: (s?: AbortSignal) => get<ControlStatus>("/api/control/status", s),
     settings: (s?: AbortSignal) => get<ControlSettings>("/api/control/settings", s),
+    contexts: (s?: AbortSignal) => get<ContextList>("/api/control/contexts", s),
+    setContext: (context: string, namespace: string) => send<{ current: { context: string; namespace: string } }>("POST", "/api/control/context", { context, namespace }),
     saveSettings: (v: Partial<ControlSettings>) => send<ControlSettings>("PUT", "/api/control/settings", v as Record<string, unknown>),
     run: (name: string, body: Record<string, unknown> = {}) => send<{ job: Job }>("POST", `/api/control/actions/${enc(name)}`, body).then((x) => x.job),
     jobs: (s?: AbortSignal) => get<Job[] | null>("/api/control/jobs", s).then((x) => x ?? []),
@@ -170,5 +174,7 @@ export const api = {
         redundancy: String(p.redundancy),
       }).toString(),
     downloadURL: (node: string, ref: string, path = "", name = "") => `/api/data/${enc(node)}/download/${enc(ref)}` + qs({ path, name }),
+    /** Retrieves through the node and discards the content. */
+    probe: (node: string, ref: string, path = "", s?: AbortSignal) => get<ProbeResult>(`/api/data/${enc(node)}/probe/${enc(ref)}` + qs({ path }), s),
   },
 };

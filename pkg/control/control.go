@@ -45,31 +45,34 @@ type Config struct {
 	Log         *slog.Logger
 	// OnJob is called when a job starts and ends (for the timeline).
 	OnJob func(v JobView)
+	// OnTarget is called after the kube context or namespace changed.
+	OnTarget func(kubeContext, namespace string)
 }
 
 // Controller owns settings, jobs and status probes.
 type Controller struct {
 	cfg       Config
-	cluster   string // k3d cluster name
 	stateDir  string
 	walletKey string
 
-	mu         sync.Mutex
-	settings   Settings
-	jobs       []*Job // newest last
-	current    *Job
-	seq        int
-	profiles   []Profile
-	checks     []string
-	profilesAt time.Time
-	status     *Status
-	statusAt   time.Time
+	mu          sync.Mutex
+	settings    Settings
+	jobs        []*Job // newest last
+	current     *Job
+	seq         int
+	profiles    []Profile
+	checks      []string
+	simulations []string
+	profilesAt  time.Time
+	status      *Status
+	statusAt    time.Time
+	versions    map[string]string // path|mtime -> version output
 }
 
 // New returns a controller and fills in auto-detected settings.
 func New(cfg Config) *Controller {
 	augmentPath()
-	c := &Controller{cfg: cfg, cluster: strings.TrimPrefix(cfg.KubeContext, "k3d-"), stateDir: cfg.StateDir}
+	c := &Controller{cfg: cfg, stateDir: cfg.StateDir}
 	c.loadSettings()
 	return c
 }
@@ -203,10 +206,11 @@ func (c *Controller) scrubber() func(string) string {
 
 // Tool is a required command-line tool.
 type Tool struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
-	OK   bool   `json:"ok"`
-	Hint string `json:"hint"`
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	OK      bool   `json:"ok"`
+	Hint    string `json:"hint"`
+	Version string `json:"version,omitempty"`
 }
 
 // NodeStatus is one Bee statefulset.
@@ -255,8 +259,12 @@ type Status struct {
 	} `json:"deployed"`
 	Profiles []Profile `json:"profiles"`
 	Checks   []string  `json:"checks"`
-	Hosts    []string  `json:"hostsMissing"`
-	Job      *JobView  `json:"job"`
+	// Simulations are the beekeeper simulations defined in the config dir.
+	Simulations []string `json:"simulations"`
+	// BeekeeperCommands are the commands the Beekeeper panel can run.
+	BeekeeperCommands []string `json:"beekeeperCommands"`
+	Hosts             []string `json:"hostsMissing"`
+	Job               *JobView `json:"job"`
 }
 
 var toolHints = map[string]string{
@@ -283,7 +291,7 @@ func (c *Controller) Status(ctx context.Context) Status {
 
 	st := Status{Enabled: true}
 	st.Settings = c.Settings()
-	st.Cluster.Name, st.Cluster.KubeContext, st.Cluster.Namespace = c.cluster, c.cfg.KubeContext, c.cfg.Namespace
+	st.Cluster.Name, st.Cluster.KubeContext, st.Cluster.Namespace = c.k3d(), c.kctx(), c.ns()
 	for _, name := range []string{"docker", "k3d", "kubectl", "helm", "beekeeper", "jq", "make"} {
 		t := Tool{Name: name, Hint: toolHints[name]}
 		if name == "beekeeper" && st.Settings.Beekeeper != "" {
@@ -293,6 +301,9 @@ func (c *Controller) Status(ctx context.Context) Status {
 		}
 		if t.OK {
 			t.Hint = ""
+			if name == "beekeeper" {
+				t.Version = c.toolVersion(ctx, t.Path)
+			}
 		}
 		st.Tools = append(st.Tools, t)
 	}
@@ -324,6 +335,10 @@ func (c *Controller) Status(ctx context.Context) Status {
 		}
 	}
 	st.Profiles, st.Checks = c.profilesAndChecks()
+	c.mu.Lock()
+	st.Simulations = append([]string{}, c.simulations...)
+	c.mu.Unlock()
+	st.BeekeeperCommands = BeekeeperCommands
 	st.Hosts = missingHosts()
 
 	c.mu.Lock()
@@ -363,7 +378,7 @@ func (c *Controller) k3dState(ctx context.Context) (exists, running bool, err er
 		return false, false, fmt.Errorf("k3d cluster list: %v", err)
 	}
 	for _, k := range cl {
-		if k.Name == c.cluster {
+		if k.Name == c.k3d() {
 			return true, k.ServersRunning > 0, nil
 		}
 	}
@@ -373,7 +388,7 @@ func (c *Controller) k3dState(ctx context.Context) (exists, running bool, err er
 func (c *Controller) kubeStatus(ctx context.Context, cs *kubernetes.Clientset, st *Status) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	ns := c.cfg.Namespace
+	ns := c.ns()
 	if g, err := cs.AppsV1().StatefulSets(ns).Get(ctx, "geth-swap", metav1.GetOptions{}); err == nil {
 		st.Geth.Installed = true
 		st.Geth.Ready = g.Status.ReadyReplicas > 0
@@ -504,3 +519,89 @@ func hostsHas(hosts, name string) bool {
 }
 
 func dockerPlatform() string { return "linux/" + runtime.GOARCH }
+
+// toolVersion runs `<path> version` once per binary build.
+func (c *Controller) toolVersion(ctx context.Context, path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	key := path + "|" + st.ModTime().String()
+	c.mu.Lock()
+	v, ok := c.versions[key]
+	c.mu.Unlock()
+	if ok {
+		return v
+	}
+	out, err := quiet(ctx, 5*time.Second, path, "version")
+	if err != nil {
+		out = ""
+	}
+	if i := strings.IndexByte(out, '\n'); i >= 0 {
+		out = out[:i]
+	}
+	c.mu.Lock()
+	if c.versions == nil {
+		c.versions = map[string]string{}
+	}
+	c.versions[key] = out
+	c.mu.Unlock()
+	return out
+}
+
+// kctx is the kube context in use; it can change at runtime (SetTarget).
+func (c *Controller) kctx() string {
+	if c.cfg.Kube != nil {
+		k, _ := c.cfg.Kube.Target()
+		return k
+	}
+	return c.cfg.KubeContext
+}
+
+// ns is the namespace of the Bee nodes.
+func (c *Controller) ns() string {
+	if c.cfg.Kube != nil {
+		_, n := c.cfg.Kube.Target()
+		return n
+	}
+	return c.cfg.Namespace
+}
+
+// k3d is the k3d cluster name behind the context ("k3d-bee" -> "bee").
+func (c *Controller) k3d() string { return strings.TrimPrefix(c.kctx(), "k3d-") }
+
+// Contexts lists the kubeconfig contexts for the context picker.
+func (c *Controller) Contexts() ([]kube.ContextInfo, error) { return c.cfg.Kube.Contexts() }
+
+// SetTarget switches the kube context and namespace for observation and
+// control. It refuses while a job runs.
+func (c *Controller) SetTarget(kubeContext, namespace string) error {
+	c.mu.Lock()
+	busy := c.current != nil
+	c.mu.Unlock()
+	if busy {
+		return ErrBusy
+	}
+	if err := c.cfg.Kube.SetTarget(kubeContext, namespace); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.status, c.profilesAt = nil, time.Time{}
+	c.settings.KubeContext, c.settings.Namespace = kubeContext, namespace
+	err := c.saveSettings()
+	c.mu.Unlock()
+	if c.cfg.OnTarget != nil {
+		c.cfg.OnTarget(kubeContext, namespace)
+	}
+	return err
+}
+
+// Target returns the kube context and namespace in use.
+func (c *Controller) Target() (string, string) { return c.kctx(), c.ns() }
+
+// AllowRemote reports whether non-local contexts may be chosen.
+func (c *Controller) AllowRemote() bool { return c.cfg.Kube != nil && c.cfg.Kube.AllowRemote() }
+
+// SetOnTarget sets the callback for target changes (wired after New because
+// the engine is created later).
+func (c *Controller) SetOnTarget(f func(kubeContext, namespace string)) { c.cfg.OnTarget = f }

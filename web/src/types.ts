@@ -442,6 +442,9 @@ export interface Profile {
   name: string;
   groups: ProfileGroup[];
   image: string;
+  funding?: { eth: number; bzz: number };
+  /** swap-initial-deposit in BZZ: nodes with less cannot start. */
+  requiredBzz?: number;
 }
 
 export type JobState = "running" | "succeeded" | "failed" | "canceled";
@@ -496,6 +499,8 @@ export interface ControlStatus {
   deployed: { groups: Record<string, number> | null; image: string };
   profiles: Profile[] | null;
   checks: string[] | null;
+  simulations?: string[] | null;
+  beekeeperCommands?: string[] | null;
   job: Job | null;
 }
 
@@ -528,4 +533,22 @@ export interface BeeStamp {
   batchTTL: number;
   immutableFlag: boolean;
   blockNumber?: number;
+}
+
+/** GET /api/data/{node}/probe/{ref}. */
+export interface ProbeResult {
+  node: string;
+  reference: string;
+  ok: boolean;
+  status?: number;
+  bytes?: number;
+  ms: number;
+  error?: string;
+}
+
+/** GET /api/control/contexts. */
+export interface ContextList {
+  current: { context: string; namespace: string };
+  allowRemote: boolean;
+  contexts: { name: string; server: string; local: boolean; current: boolean; reason: string }[] | null;
 }

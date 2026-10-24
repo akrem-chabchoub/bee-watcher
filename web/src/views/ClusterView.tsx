@@ -3,7 +3,7 @@ import { api } from "../api";
 import { jobRunning, runAction, useControl } from "../control";
 import { dur, fmtTime } from "../format";
 import { useNow } from "../components/Badges";
-import type { ControlNode, ControlSettings, ControlStatus, Job, JobLine, Profile, StepState } from "../types";
+import type { ContextList, ControlNode, ControlSettings, ControlStatus, Job, JobLine, Profile, StepState } from "../types";
 import { Term } from "../components/Explain";
 import { ErrorNote, Skeleton } from "../components/Feedback";
 import { toast } from "../ui";
@@ -26,6 +26,8 @@ export function ClusterView() {
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [deployImage, setDeployImage] = useState<string | null>(null);
+  const [bkNodes, setBkNodes] = useState<string[] | null>(null);
+  const bkRef = useRef<HTMLElement>(null);
 
   if (!status) {
     return (
@@ -79,11 +81,20 @@ export function ClusterView() {
             </button>
           </div>
         )}
+        <ContextCard status={status} locked={locked} />
         <Checklist status={status} locked={locked} act={act} />
-        <NodesCard status={status} locked={locked} act={act} />
+        <NodesCard
+          status={status}
+          locked={locked}
+          act={act}
+          onBeekeeper={(node) => {
+            setBkNodes([node]);
+            bkRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+          }}
+        />
         <DeployCard status={status} locked={locked} act={act} image={deployImage} setImage={setDeployImage} />
         <BuildCard status={status} locked={locked} act={act} useImage={setDeployImage} />
-        <ChecksCard status={status} locked={locked} act={act} />
+        <BeekeeperCard status={status} locked={locked} act={act} nodes={bkNodes} setNodes={setBkNodes} cardRef={bkRef} />
         <SettingsCard settings={status.settings} disabled={disabled} />
       </div>
       <JobPanel status={status} />
@@ -93,6 +104,105 @@ export function ClusterView() {
 }
 
 type Act = (name: string, body?: Record<string, unknown>, ask?: Omit<Confirm, "run">) => void;
+
+// ---- Kubernetes context ----
+
+function ContextCard({ status, locked }: { status: ControlStatus; locked: boolean }) {
+  const [info, setInfo] = useState<ContextList | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [pick, setPick] = useState<string | null>(null);
+  const [ns, setNs] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [ask, setAsk] = useState(false);
+  const load = () =>
+    api.control.contexts().then(
+      (v) => (setInfo(v), setErr(null)),
+      (e: unknown) => setErr(e instanceof Error ? e.message : String(e)),
+    );
+  useEffect(() => {
+    void load();
+  }, [status.cluster.kubeContext, status.cluster.namespace]);
+  if (!status.enabled) return null;
+  const cur = status.cluster.kubeContext;
+  const target = pick ?? cur;
+  const namespace = ns ?? status.cluster.namespace;
+  const changed = target !== cur || namespace !== status.cluster.namespace;
+  const sel = info?.contexts?.find((c) => c.name === target);
+  const switchNow = () => {
+    setBusy(true);
+    api.control
+      .setContext(target, namespace)
+      .then(
+        () => {
+          toast("ok", `Now observing ${target} / ${namespace}`);
+          setPick(null);
+          setNs(null);
+          void useControl.getState().refresh();
+        },
+        (e: unknown) => toast("bad", `Could not switch: ${friendly(e).text}`, e instanceof Error ? e.message : String(e)),
+      )
+      .finally(() => (setBusy(false), setAsk(false)));
+  };
+  return (
+    <section className="card context-card">
+      <div className="card-head">
+        <h2>
+          Kubernetes <Term id="k3d">cluster</Term>
+        </h2>
+        <span className="muted small">which cluster bee-scope observes and controls</span>
+      </div>
+      <div className="bk-row">
+        <label className="field inline">
+          <span className="muted small">context</span>
+          <select value={target} onChange={(e) => setPick(e.target.value)} disabled={locked || busy}>
+            {!info?.contexts?.some((c) => c.name === cur) && <option value={cur}>{cur}</option>}
+            {(info?.contexts ?? []).map((c) => (
+              <option key={c.name} value={c.name} disabled={!c.local && !info?.allowRemote} title={c.reason || c.server}>
+                {c.name}
+                {c.current ? " (kubectl current)" : ""}
+                {!c.local ? (info?.allowRemote ? " ⚠ remote" : " — not local, blocked") : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field inline">
+          <span className="muted small">namespace</span>
+          <input value={namespace} onChange={(e) => setNs(e.target.value.trim())} disabled={locked || busy} style={{ width: 120 }} />
+        </label>
+        {changed && (
+          <>
+            <button className="btn primary" disabled={locked || busy || !namespace} onClick={() => setAsk(true)}>
+              ⇄ Switch
+            </button>
+            <button className="btn ghost" onClick={() => (setPick(null), setNs(null))}>
+              cancel
+            </button>
+          </>
+        )}
+        {!changed && <span className="muted small mono">{sel?.server ?? ""}</span>}
+      </div>
+      {err && <ErrorNote error={err} prefix="Could not read the kubeconfig" />}
+      {info && !info.allowRemote && info.contexts?.some((c) => !c.local) && (
+        <p className="muted small">
+          Contexts that are not a local k3d cluster are blocked, so a shared cluster can never be touched by accident. Start bee-scope with <code>--allow-remote</code> to allow them.
+        </p>
+      )}
+      {ask && (
+        <ConfirmDialog
+          c={{
+            title: `Switch to ${target} / ${namespace}?`,
+            label: "Switch",
+            consequence: `bee-scope will observe ${target} (namespace ${namespace}) and every Cluster, Data and beekeeper action will target it. ${
+              sel && !sel.local ? "⚠ This is NOT a local k3d cluster." : ""
+            } It is remembered for the next start.`,
+            run: async () => switchNow(),
+          }}
+          onClose={() => setAsk(false)}
+        />
+      )}
+    </section>
+  );
+}
 
 // ---- Setup checklist ----
 
@@ -225,7 +335,7 @@ function phaseClass(n: ControlNode): string {
 
 const phaseIcon: Record<string, string> = { ok: "●", warn: "◐", bad: "✕", idle: "■" };
 
-function NodesCard({ status, locked, act }: { status: ControlStatus; locked: boolean; act: Act }) {
+function NodesCard({ status, locked, act, onBeekeeper }: { status: ControlStatus; locked: boolean; act: Act; onBeekeeper: (node: string) => void }) {
   const now = useNow();
   const nodes = status.nodes ?? [];
   const c = status.cluster;
@@ -330,6 +440,9 @@ function NodesCard({ status, locked, act }: { status: ControlStatus; locked: boo
                     </td>
                     <td className="muted">{n.startedAt && !stopped ? dur(Math.max(0, now - Date.parse(n.startedAt))) : "—"}</td>
                     <td className="row-actions">
+                      <button className="btn" disabled={stopped} onClick={() => onBeekeeper(n.name)} title={`Run a beekeeper check or command on ${n.name} only`}>
+                        🐝 Beekeeper
+                      </button>
                       <button className="btn" disabled={locked || stopped} onClick={() => act("node-restart", { node: n.name })} title="Delete the pod; Kubernetes recreates it">
                         ↻ Restart
                       </button>
@@ -580,61 +693,434 @@ useControl.subscribe((s, prev) => {
   }
 });
 
-// ---- Checks ----
+// ---- Beekeeper ----
 
-function ChecksCard({ status, locked, act }: { status: ControlStatus; locked: boolean; act: Act }) {
+type BKCommand = "check" | "simulate" | "print" | "stamper-create" | "stamper-topup" | "stamper-dilute" | "node-funder" | "restart";
+
+const bkCommands: { id: BKCommand; label: string; help: string; term?: string }[] = [
+  { id: "check", label: "check", help: "Integration tests: upload, sync and retrieve real data and verify the result." },
+  { id: "simulate", label: "simulate", help: "Load simulations (upload, retrieval, …) that keep generating traffic." },
+  { id: "print", label: "print", help: "Show addresses, overlays, peers, topology or depths as beekeeper sees them." },
+  { id: "stamper-create", label: "stamper create", help: "Buy a postage batch on each chosen node.", term: "batch" },
+  { id: "stamper-topup", label: "stamper topup", help: "Top up batches whose remaining TTL is below a threshold.", term: "top-up" },
+  { id: "stamper-dilute", label: "stamper dilute", help: "Increase the depth of batches that are almost full.", term: "dilute" },
+  { id: "node-funder", label: "node-funder", help: "Send ETH / BZZ from the beekeeper wallet to nodes below a minimum balance." },
+  { id: "restart", label: "restart", help: "Restart the chosen nodes through beekeeper, optionally onto another image." },
+];
+
+const printWhat = ["topologies", "overlays", "addresses", "peers", "depths", "nodes"];
+
+function BeekeeperCard({
+  status,
+  locked,
+  act,
+  nodes,
+  setNodes,
+  cardRef,
+}: {
+  status: ControlStatus;
+  locked: boolean;
+  act: Act;
+  nodes: string[] | null;
+  setNodes: (v: string[] | null) => void;
+  cardRef: React.RefObject<HTMLElement>;
+}) {
+  const allNodes = (status.nodes ?? []).map((n) => n.name);
+  const [cmd, setCmd] = useState<BKCommand>("check");
   const checks = useMemo(() => {
     const all = status.checks ?? [];
     return [...all.filter((c) => c.startsWith("ci-")), ...all.filter((c) => !c.startsWith("ci-"))];
   }, [status.checks]);
-  const [sel, setSel] = useState<string[]>([]);
+  const sims = status.simulations ?? [];
+  const [selChecks, setSelChecks] = useState<string[]>([]);
+  const [selSims, setSelSims] = useState<string[]>([]);
   const [showAll, setShowAll] = useState(false);
-  const visible = showAll ? checks : checks.filter((c) => c.startsWith("ci-"));
-  const canRun = status.enabled && (status.nodes ?? []).some((n) => n.ready > 0);
+  const [what, setWhat] = useState("topologies");
+  const [timeout, setTimeoutV] = useState("15m");
+  const [seed, setSeed] = useState("");
+  const [depth, setDepth] = useState(17);
+  const [duration, setDuration] = useState("24h");
+  const [label, setLabel] = useState("beekeeper");
+  const [ttl, setTtl] = useState("120h");
+  const [topupTo, setTopupTo] = useState("720h");
+  const [usage, setUsage] = useState(90);
+  const [levels, setLevels] = useState(1);
+  const [batchIds, setBatchIds] = useState("");
+  const profile = (status.profiles ?? []).find((p) => p.name === status.settings.profile);
+  const needBzz = profile?.requiredBzz ?? 0;
+  // Default to what beekeeper funds at create time, and never below what a
+  // node needs to deploy its chequebook.
+  const [minNative, setMinNative] = useState(String(profile?.funding?.eth || 0.1));
+  const [minSwarm, setMinSwarm] = useState(String(Math.max(profile?.funding?.bzz || 100, needBzz * 2)));
+  const [image, setImage] = useState("");
+  const [raw, setRaw] = useState<string | null>(null);
+  const [clusterSel, setClusterSel] = useState("");
+  const clusters = ["bee-scope", ...(nodes !== null ? ["bee-scope-selection"] : []), ...(status.profiles ?? []).map((p) => p.name)];
+
+  const scoped = nodes !== null;
+  const chosen = nodes ?? [];
+  const visibleChecks = showAll ? checks : checks.filter((c) => c.startsWith("ci-"));
+  const ready = (status.nodes ?? []).some((n) => n.ready > 0);
+  const known = !!status.settings.profile;
+
+  const body: Record<string, unknown> = { command: cmd, nodes: scoped ? chosen : [], timeout };
+  if (seed.trim() !== "" && (cmd === "check" || cmd === "simulate")) body.seed = Number(seed);
+  if (cmd === "check") body.checks = selChecks;
+  if (cmd === "simulate") body.simulations = selSims;
+  if (cmd === "print") body.what = what;
+  if (cmd === "stamper-create") Object.assign(body, { depth, duration, label });
+  if (cmd === "stamper-topup") Object.assign(body, { ttlThreshold: ttl, topupTo });
+  if (cmd === "stamper-dilute") Object.assign(body, { usageThreshold: usage, dilutionDepth: levels });
+  if (cmd === "stamper-topup" || cmd === "stamper-dilute") {
+    const ids = batchIds.split(/[\s,]+/).filter(Boolean);
+    if (ids.length) body.batchIds = ids;
+  }
+  if (cmd === "node-funder") Object.assign(body, { minNative: Number(minNative), minSwarm: Number(minSwarm) });
+  if (cmd === "restart" && image.trim()) body.image = image.trim();
+
+  let missing = "";
+  if (!known) missing = "Deploy once (or pick a profile in Deploy) so beekeeper knows the cluster layout.";
+  else if (!ready) missing = "Needs at least one ready node.";
+  else if (scoped && chosen.length === 0) missing = "Choose at least one node, or switch to the whole cluster.";
+  else if (cmd === "check" && selChecks.length === 0) missing = "Choose at least one check.";
+  else if (cmd === "simulate" && selSims.length === 0) missing = "Choose at least one simulation.";
+  else if (cmd === "node-funder" && needBzz > 0 && Number(minSwarm) < needBzz) missing = `Min BZZ must be at least ${needBzz}: below that a node cannot deploy its chequebook.`;
+
+  const autoCluster = scoped ? "bee-scope-selection" : "bee-scope";
+  const cluster = clusterSel || autoCluster;
+  if (clusterSel) body.cluster = clusterSel;
+  const preview = ["beekeeper", ...cmdLine(body), "--cluster-name", cluster].join(" ");
+  const line = raw ?? preview;
+  const edited = raw !== null && raw !== preview;
+  const scopeText = scoped ? chosen.join(", ") || "no nodes" : "the whole cluster";
+  const run = () => {
+    if (edited) {
+      const rawBody: Record<string, unknown> = { raw: line, nodes: scoped ? chosen : [] };
+      act("beekeeper", rawBody, {
+        title: "Run this beekeeper command?",
+        label: "Run",
+        consequence: (
+          <>
+            <code className="wrap">{line}</code>
+            <br />
+            bee-scope adds <code>--config-dir</code> and a <code>--kubeconfig</code> for {status.cluster.kubeContext} only, so the command cannot reach another cluster.
+          </>
+        ),
+      });
+      return;
+    }
+    if (cmd === "restart" || cmd === "node-funder" || cmd.startsWith("stamper-")) {
+      act("beekeeper", body, {
+        title: `beekeeper ${bkCommands.find((c) => c.id === cmd)?.label} on ${scopeText}`,
+        label: "Run",
+        consequence:
+          cmd === "restart"
+            ? `Restarts ${scopeText}${body.image ? ` onto ${String(body.image)}` : ""}. The nodes go offline briefly.`
+            : cmd === "node-funder"
+              ? `Sends ETH/BZZ from the beekeeper wallet on the local chain to ${scopeText} where balances are below the minimum.`
+              : `Changes postage batches on ${scopeText} (spends BZZ from the nodes' wallets on the local chain).`,
+      });
+    } else act("beekeeper", body);
+  };
+
   return (
-    <section className="card">
+    <section className="card" ref={cardRef}>
       <h2>
-        Run <Term id="beekeeper">beekeeper</Term> checks
+        Run <Term id="beekeeper">beekeeper</Term>
       </h2>
-      <p className="muted small">Runs <code>beekeeper check</code> against the deployed nodes. Checks generate real traffic, which shows up in Topology and Operations.</p>
-      {checks.length === 0 ? (
-        <div className="muted">No checks found in the beekeeper config.</div>
-      ) : (
-        <>
+      <p className="muted small">
+        Checks, simulations and tools for the whole cluster or for chosen nodes. Output streams into the job panel; traffic shows up in Topology and Operations.
+      </p>
+
+      <div className="bk-row">
+        <span className="bk-label">Scope</span>
+        <div className="segmented" role="radiogroup" aria-label="Scope">
+          <button role="radio" aria-checked={!scoped} className={"seg" + (!scoped ? " on" : "")} onClick={() => setNodes(null)}>
+            Whole cluster
+          </button>
+          <button role="radio" aria-checked={scoped} className={"seg" + (scoped ? " on" : "")} onClick={() => setNodes(nodes ?? [])}>
+            Chosen nodes{scoped && chosen.length ? ` (${chosen.length})` : ""}
+          </button>
+        </div>
+      </div>
+      {scoped && (
+        <div className="chips bk-nodes">
+          {allNodes.map((n) => (
+            <button
+              key={n}
+              className={"chip" + (chosen.includes(n) ? " on" : "")}
+              aria-pressed={chosen.includes(n)}
+              onClick={() => setNodes(chosen.includes(n) ? chosen.filter((x) => x !== n) : [...chosen, n])}
+            >
+              {chosen.includes(n) ? "✔ " : ""}
+              {n}
+            </button>
+          ))}
+          {allNodes.length > 0 && (
+            <button className="chip" onClick={() => setNodes(chosen.length === allNodes.length ? [] : allNodes)}>
+              {chosen.length === allNodes.length ? "none" : "all"}
+            </button>
+          )}
+        </div>
+      )}
+      {scoped && chosen.length === 1 && (cmd === "check" || cmd === "simulate") && (
+        <p className="muted small">Many checks compare several nodes (upload on one, retrieve from another); with a single node some of them fail by design.</p>
+      )}
+
+      <div className="bk-row">
+        <span className="bk-label">Command</span>
+        <div className="chips">
+          {bkCommands.map((c) => (
+            <button key={c.id} className={"chip" + (cmd === c.id ? " on" : "")} aria-pressed={cmd === c.id} onClick={() => setCmd(c.id)} title={c.help}>
+              {c.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <p className="small bk-help">
+        {bkCommands.find((c) => c.id === cmd)?.help}
+        {bkCommands.find((c) => c.id === cmd)?.term && (
+          <>
+            {" "}
+            <Term id={bkCommands.find((c) => c.id === cmd)!.term!}>What is this?</Term>
+          </>
+        )}
+      </p>
+
+      {cmd === "check" &&
+        (checks.length === 0 ? (
+          <div className="muted">No checks found in the beekeeper config.</div>
+        ) : (
           <div className="chips">
-            {visible.map((c) => (
-              <button
-                key={c}
-                className={"chip" + (sel.includes(c) ? " on" : "")}
-                aria-pressed={sel.includes(c)}
-                disabled={locked}
-                onClick={() => setSel((v) => (v.includes(c) ? v.filter((x) => x !== c) : [...v, c]))}
-              >
-                {sel.includes(c) ? "✔ " : ""}
+            {visibleChecks.map((c) => (
+              <button key={c} className={"chip" + (selChecks.includes(c) ? " on" : "")} aria-pressed={selChecks.includes(c)} onClick={() => setSelChecks((v) => (v.includes(c) ? v.filter((x) => x !== c) : [...v, c]))}>
+                {selChecks.includes(c) ? "✔ " : ""}
                 {c}
               </button>
             ))}
-            {checks.length > visible.length || showAll ? (
+            {checks.length > visibleChecks.length || showAll ? (
               <button className="chip" onClick={() => setShowAll(!showAll)}>
-                {showAll ? "only ci-*" : `+${checks.length - visible.length} more`}
+                {showAll ? "only ci-*" : `+${checks.length - visibleChecks.length} more`}
               </button>
             ) : null}
           </div>
-          <div className="row">
-            <button className="btn primary" disabled={locked || !canRun || sel.length === 0} onClick={() => act("check-run", { checks: sel })}>
-              ▶ Run {sel.length ? sel.length : ""} check{sel.length === 1 ? "" : "s"}
-            </button>
-            {sel.length > 0 && (
-              <button className="btn ghost" onClick={() => setSel([])}>
-                clear
+        ))}
+      {cmd === "simulate" &&
+        (sims.length === 0 ? (
+          <div className="muted">No simulations found in the beekeeper config.</div>
+        ) : (
+          <div className="chips">
+            {sims.map((c) => (
+              <button key={c} className={"chip" + (selSims.includes(c) ? " on" : "")} aria-pressed={selSims.includes(c)} onClick={() => setSelSims((v) => (v.includes(c) ? v.filter((x) => x !== c) : [...v, c]))}>
+                {selSims.includes(c) ? "✔ " : ""}
+                {c}
               </button>
-            )}
-            {!canRun && status.enabled && <span className="muted small">Needs at least one ready node.</span>}
+            ))}
           </div>
-        </>
+        ))}
+      {cmd === "print" && (
+        <div className="chips">
+          {printWhat.map((w) => (
+            <button key={w} className={"chip" + (what === w ? " on" : "")} aria-pressed={what === w} onClick={() => setWhat(w)}>
+              {w}
+            </button>
+          ))}
+        </div>
       )}
+
+      <div className="form-grid bk-fields">
+        {cmd === "stamper-create" && (
+          <>
+            <label className="field">
+              <span>
+                <Term id="batch-depth">Depth</Term>
+              </span>
+              <input type="number" min={17} max={40} value={depth} onChange={(e) => setDepth(Number(e.target.value))} />
+            </label>
+            <label className="field">
+              <span>
+                Duration <span className="muted">(e.g. 24h, 168h)</span>
+              </span>
+              <input value={duration} onChange={(e) => setDuration(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>Label</span>
+              <input value={label} onChange={(e) => setLabel(e.target.value)} />
+            </label>
+          </>
+        )}
+        {cmd === "stamper-topup" && (
+          <>
+            <label className="field">
+              <span>
+                When <Term id="ttl">TTL</Term> below
+              </span>
+              <input value={ttl} onChange={(e) => setTtl(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>Top up to</span>
+              <input value={topupTo} onChange={(e) => setTopupTo(e.target.value)} />
+            </label>
+          </>
+        )}
+        {cmd === "stamper-dilute" && (
+          <>
+            <label className="field">
+              <span>
+                When <Term id="utilization">usage</Term> above (%)
+              </span>
+              <input type="number" min={1} max={100} value={usage} onChange={(e) => setUsage(Number(e.target.value))} />
+            </label>
+            <label className="field">
+              <span>Add depth levels</span>
+              <input type="number" min={1} max={10} value={levels} onChange={(e) => setLevels(Number(e.target.value))} />
+            </label>
+          </>
+        )}
+        {(cmd === "stamper-topup" || cmd === "stamper-dilute") && (
+          <label className="field wide">
+            <span>
+              Only these batch ids <span className="muted">(optional, comma separated; empty = all batches)</span>
+            </span>
+            <input className="mono" value={batchIds} onChange={(e) => setBatchIds(e.target.value)} placeholder="all batches" />
+          </label>
+        )}
+        {cmd === "node-funder" && (
+          <>
+            <label className="field">
+              <span>Min ETH per node</span>
+              <input type="number" min={0} step="0.01" value={minNative} onChange={(e) => setMinNative(e.target.value)} />
+            </label>
+            <label className="field">
+              <span>
+                Min <Term id="bzz">BZZ</Term> per node
+              </span>
+              <input type="number" min={0} value={minSwarm} onChange={(e) => setMinSwarm(e.target.value)} />
+            </label>
+            <p className="form-note muted small">
+              Tops every chosen node up to these minimums from the beekeeper wallet.
+              {needBzz > 0 && (
+                <>
+                  {" "}
+                  A node needs at least <b>{needBzz} BZZ</b> (its <Term id="chequebook">chequebook</Term> deposit, <code>swap-initial-deposit</code>) before it can start; with less it keeps restarting with
+                  &quot;insufficient sBZZ for deploying chequebook&quot;.
+                </>
+              )}
+            </p>
+          </>
+        )}
+        {cmd === "restart" && (
+          <label className="field wide">
+            <span>
+              Image <span className="muted">(optional; empty keeps the current image)</span>
+            </span>
+            <input className="mono" value={image} onChange={(e) => setImage(e.target.value)} placeholder={status.deployed.image || "current image"} />
+          </label>
+        )}
+        {(cmd === "check" || cmd === "simulate") && (
+          <label className="field">
+            <span>
+              Seed <span className="muted">(optional, repeat a run)</span>
+            </span>
+            <input type="number" value={seed} onChange={(e) => setSeed(e.target.value)} placeholder="random" />
+          </label>
+        )}
+        <label className="field">
+          <span>Timeout</span>
+          <input value={timeout} onChange={(e) => setTimeoutV(e.target.value)} />
+        </label>
+      </div>
+
+      <div className="bk-row">
+        <span className="bk-label">Cluster</span>
+        <select value={clusterSel} onChange={(e) => (setClusterSel(e.target.value), setRaw(null))} aria-label="beekeeper cluster">
+          <option value="">{autoCluster} (automatic: {scoped ? "chosen nodes only" : "the deployed layout"})</option>
+          {clusters
+            .filter((c) => c !== autoCluster)
+            .map((c) => (
+              <option key={c} value={c}>
+                {c}
+                {c === "bee-scope" ? " (deployed layout)" : c === "bee-scope-selection" ? " (chosen nodes)" : " (profile from your beekeeper config)"}
+              </option>
+            ))}
+        </select>
+        <span className="muted small">
+          on <b>{status.cluster.kubeContext}</b> / {status.cluster.namespace}
+        </span>
+      </div>
+
+      <label className="bk-cmd">
+        <span className="muted small">
+          Command — edit it freely{edited ? " (edited: the form above is ignored)" : ""}. bee-scope adds <code>--config-dir</code> and a single-context <code>--kubeconfig</code>.
+        </span>
+        <div className="bk-cmd-row">
+          <span className="mono muted">$</span>
+          <textarea
+            className={"mono" + (edited ? " edited" : "")}
+            value={line}
+            rows={Math.min(4, Math.max(1, Math.ceil(line.length / 110)))}
+            spellCheck={false}
+            onChange={(e) => setRaw(e.target.value.replace(/\n/g, " "))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                if (!locked && (edited || !missing)) run();
+              }
+            }}
+            aria-label="beekeeper command line"
+          />
+          {edited && (
+            <button className="btn ghost" onClick={() => setRaw(null)} title="Throw away the edits and follow the form again">
+              ↺ reset
+            </button>
+          )}
+        </div>
+      </label>
+      <div className="row">
+        <button className="btn primary" disabled={locked || (!edited && !!missing) || !line.trim()} onClick={run} title={!edited ? missing || undefined : "Run the edited command (⌘↵)"}>
+          ▶ {edited ? "Run edited command" : `Run on ${scoped ? (chosen.length === 1 ? chosen[0] : `${chosen.length} nodes`) : "whole cluster"}`}
+        </button>
+        {!edited && missing && <span className="muted small">{missing}</span>}
+      </div>
     </section>
   );
+}
+
+/** Mirrors the backend's argument building, for the preview line only. */
+function cmdLine(b: Record<string, unknown>): string[] {
+  const list = (v: unknown) => (Array.isArray(v) ? v.join(",") : "");
+  const out: string[] = [];
+  switch (b.command) {
+    case "check":
+      out.push("check", "--checks", list(b.checks) || "…", "--metrics-enabled=false");
+      break;
+    case "simulate":
+      out.push("simulate", "--simulations", list(b.simulations) || "…", "--metrics-enabled=false");
+      break;
+    case "print":
+      out.push("print", String(b.what));
+      break;
+    case "stamper-create":
+      out.push("stamper", "create", "--depth", String(b.depth), "--duration", String(b.duration), "--postage-label", String(b.label));
+      break;
+    case "stamper-topup":
+      out.push("stamper", "topup", "--ttl-threshold", String(b.ttlThreshold), "--topup-to", String(b.topupTo));
+      break;
+    case "stamper-dilute":
+      out.push("stamper", "dilute", "--usage-threshold", String(b.usageThreshold), "--dilution-depth", String(b.dilutionDepth));
+      break;
+    case "node-funder":
+      out.push("node-funder", "--min-native", String(b.minNative), "--min-swarm", String(b.minSwarm));
+      break;
+    case "restart":
+      out.push("restart");
+      if (b.image) out.push("--image", String(b.image));
+      break;
+  }
+  if (b.batchIds) out.push("--batch-ids", list(b.batchIds));
+  if (b.seed !== undefined) out.push("--seed", String(b.seed));
+  out.push("--timeout", String(b.timeout));
+  return out;
 }
 
 // ---- Settings ----

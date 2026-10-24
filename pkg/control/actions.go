@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,10 +30,33 @@ type ActionRequest struct {
 	Tag     string         `json:"tag"`
 	Checks  []string       `json:"checks"`
 	Timeout string         `json:"timeout"`
+
+	// beekeeper action (Beekeeper panel); Nodes empty = whole cluster.
+	Command        string   `json:"command"`
+	Nodes          []string `json:"nodes"`
+	Simulations    []string `json:"simulations"`
+	What           string   `json:"what"` // print: addresses, depths, nodes, overlays, peers, topologies
+	Seed           *int64   `json:"seed"`
+	Depth          int      `json:"depth"`
+	Duration       string   `json:"duration"`
+	Label          string   `json:"label"`
+	TTLThreshold   string   `json:"ttlThreshold"`
+	TopupTo        string   `json:"topupTo"`
+	UsageThreshold float64  `json:"usageThreshold"`
+	DilutionDepth  int      `json:"dilutionDepth"`
+	BatchIDs       []string `json:"batchIds"`
+	MinNative      float64  `json:"minNative"`
+	MinSwarm       float64  `json:"minSwarm"`
+	// Cluster is the beekeeper --cluster-name (default: bee-scope, or
+	// bee-scope-selection when Nodes is set).
+	Cluster string `json:"cluster"`
+	// Raw is a hand-edited command line; it replaces Command and the typed
+	// fields. See parseRaw for what is allowed.
+	Raw string `json:"raw"`
 }
 
 // Actions lists the action names.
-var Actions = []string{"docker-start", "cluster-create", "cluster-start", "cluster-stop", "cluster-delete", "bee-deploy", "bee-remove", "node-restart", "node-stop", "node-start", "restart-all", "image-build", "check-run"}
+var Actions = []string{"docker-start", "cluster-create", "cluster-start", "cluster-stop", "cluster-delete", "bee-deploy", "bee-remove", "node-restart", "node-stop", "node-start", "restart-all", "image-build", "check-run", "beekeeper"}
 
 var (
 	nodeName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,50}[a-z0-9])?$`)
@@ -51,11 +75,11 @@ func (c *Controller) Run(name string, req ActionRequest) (*Job, error) {
 			"Check prerequisites", "Local image registry", "k3d cluster", "Helm chart repository", "Wait for Traefik", "Install geth (local blockchain)",
 		}, c.clusterCreate)
 	case "cluster-start":
-		return c.start(name, "Start the cluster", []string{"Start the image registry", "Start k3d cluster " + c.cluster, "Wait for the Kubernetes API"}, c.clusterStart)
+		return c.start(name, "Start the cluster", []string{"Start the image registry", "Start k3d cluster " + c.k3d(), "Wait for the Kubernetes API"}, c.clusterStart)
 	case "cluster-stop":
-		return c.start(name, "Stop the cluster", []string{"Stop k3d cluster " + c.cluster, "Stop the image registry"}, c.clusterStop)
+		return c.start(name, "Stop the cluster", []string{"Stop k3d cluster " + c.k3d(), "Stop the image registry"}, c.clusterStop)
 	case "cluster-delete":
-		return c.start(name, "Delete the cluster", []string{"Delete k3d cluster " + c.cluster, "Delete the image registries"}, c.clusterDelete)
+		return c.start(name, "Delete the cluster", []string{"Delete k3d cluster " + c.k3d(), "Delete the image registries"}, c.clusterDelete)
 	case "bee-deploy":
 		pl, title, err := c.plan(req)
 		if err != nil {
@@ -90,24 +114,42 @@ func (c *Controller) Run(name string, req ActionRequest) (*Job, error) {
 			return c.imageBuild(ctx, j, tag)
 		})
 	case "check-run":
-		if len(req.Checks) == 0 {
-			return nil, errors.New("choose at least one check")
-		}
-		for _, ch := range req.Checks {
-			if !checkRe.MatchString(ch) {
-				return nil, fmt.Errorf("invalid check name %q", ch)
+		// Kept for API compatibility: the same as beekeeper with command check.
+		req.Command = "check"
+		fallthrough
+	case "beekeeper":
+		for _, n := range req.Nodes {
+			if !nodeName.MatchString(n) {
+				return nil, fmt.Errorf("invalid node name %q", n)
 			}
 		}
-		timeout := 15 * time.Minute
-		if req.Timeout != "" {
-			d, err := time.ParseDuration(req.Timeout)
-			if err != nil || d <= 0 || d > 3*time.Hour {
-				return nil, errors.New("timeout must be a duration up to 3h, e.g. 15m")
+		var args []string
+		var title string
+		var err error
+		if strings.TrimSpace(req.Raw) != "" {
+			args, err = parseRaw(req.Raw)
+			title = "beekeeper " + strings.Join(args, " ")
+			if len(title) > 120 {
+				title = title[:117] + "…"
 			}
-			timeout = d
+		} else {
+			args, title, err = beekeeperArgs(req)
+			if err == nil && req.Command == "node-funder" {
+				if need := c.requiredBZZ(); req.MinSwarm > 0 && req.MinSwarm < need {
+					err = fmt.Errorf("min BZZ %g is below the %g BZZ each node needs to deploy its chequebook (swap-initial-deposit); nodes would stay stuck", req.MinSwarm, need)
+				}
+			}
 		}
-		return c.start(name, "beekeeper check "+strings.Join(req.Checks, ", "), []string{"Generate the beekeeper config", "beekeeper check"}, func(ctx context.Context, j *Job) error {
-			return c.checkRun(ctx, j, req.Checks, timeout)
+		if err != nil {
+			return nil, err
+		}
+		cluster, err := c.clusterFor(req, args)
+		if err != nil {
+			return nil, err
+		}
+		nodes := append([]string(nil), req.Nodes...)
+		return c.start("beekeeper", title, []string{"Generate the beekeeper config", "beekeeper " + args[0]}, func(ctx context.Context, j *Job) error {
+			return c.runBeekeeper(ctx, j, nodes, args, cluster)
 		})
 	}
 	return nil, fmt.Errorf("unknown action %q", name)
@@ -199,14 +241,14 @@ func (c *Controller) beelocalDefault(name, fallback string) string {
 }
 
 func (c *Controller) kubectl(args ...string) []string {
-	return append([]string{"--context", c.cfg.KubeContext}, args...)
+	return append([]string{"--context", c.kctx()}, args...)
 }
 
 func (c *Controller) clusterCreate(ctx context.Context, j *Job) error {
 	s := c.Settings()
 	port := c.beelocalDefault("REGISTRY_PORT", "5000")
 	k3sVersion := c.beelocalDefault("K3S_VERSION", "")
-	ns := c.cfg.Namespace
+	ns := c.ns()
 	steps := []func(ctx context.Context) error{
 		func(ctx context.Context) error {
 			if !c.dockerRunning(ctx) {
@@ -242,10 +284,10 @@ func (c *Controller) clusterCreate(ctx context.Context, j *Job) error {
 				return err
 			}
 			if exists && running {
-				return j.skipf("cluster %s is already running", c.cluster)
+				return j.skipf("cluster %s is already running", c.k3d())
 			}
 			if exists {
-				return j.run(ctx, "", "k3d", "cluster", "start", c.cluster)
+				return j.run(ctx, "", "k3d", "cluster", "start", c.k3d())
 			}
 			raw, err := os.ReadFile(filepath.Join(s.BeelocalDir, "config", "k3d.yaml"))
 			if err != nil {
@@ -301,7 +343,7 @@ func (c *Controller) clusterCreate(ctx context.Context, j *Job) error {
 }
 
 func (c *Controller) installGeth(ctx context.Context, j *Job, ns string) error {
-	if _, err := quiet(ctx, 15*time.Second, "helm", "--kube-context", c.cfg.KubeContext, "get", "values", "geth-swap", "-n", ns, "-o", "json"); err == nil {
+	if _, err := quiet(ctx, 15*time.Second, "helm", "--kube-context", c.kctx(), "get", "values", "geth-swap", "-n", ns, "-o", "json"); err == nil {
 		return j.skipf("geth-swap is already installed")
 	}
 	s := c.Settings()
@@ -311,7 +353,7 @@ func (c *Controller) installGeth(ctx context.Context, j *Job, ns string) error {
 	}
 	img := c.beelocalDefault("SETUP_CONTRACT_IMAGE", "ethersphere/bee-localchain")
 	tag := c.beelocalDefault("SETUP_CONTRACT_IMAGE_TAG", "latest")
-	if err := j.run(ctx, "", "helm", "--kube-context", c.cfg.KubeContext, "install", "geth-swap", "ethersphere/geth-swap",
+	if err := j.run(ctx, "", "helm", "--kube-context", c.kctx(), "install", "geth-swap", "ethersphere/geth-swap",
 		"--create-namespace", "-n", ns, "-f", values,
 		"--set", "imageSetupContract.repository="+img, "--set", "imageSetupContract.tag="+tag); err != nil {
 		return err
@@ -333,14 +375,14 @@ func (c *Controller) clusterStart(ctx context.Context, j *Job) error {
 		return err
 	}
 	if err := j.step(ctx, 1, func(ctx context.Context) error {
-		return j.run(ctx, "", "k3d", "cluster", "start", c.cluster)
+		return j.run(ctx, "", "k3d", "cluster", "start", c.k3d())
 	}); err != nil {
 		return err
 	}
 	c.cfg.Kube.Reset()
 	return j.step(ctx, 2, func(ctx context.Context) error {
 		return j.waitFor(ctx, "the Kubernetes API", 2*time.Minute, 2*time.Second, func(ctx context.Context) (bool, error) {
-			_, err := quiet(ctx, 8*time.Second, "kubectl", c.kubectl("get", "ns", c.cfg.Namespace)...)
+			_, err := quiet(ctx, 8*time.Second, "kubectl", c.kubectl("get", "ns", c.ns())...)
 			return err == nil, err
 		})
 	})
@@ -348,7 +390,7 @@ func (c *Controller) clusterStart(ctx context.Context, j *Job) error {
 
 func (c *Controller) clusterStop(ctx context.Context, j *Job) error {
 	if err := j.step(ctx, 0, func(ctx context.Context) error {
-		return j.run(ctx, "", "k3d", "cluster", "stop", c.cluster)
+		return j.run(ctx, "", "k3d", "cluster", "stop", c.k3d())
 	}); err != nil {
 		return err
 	}
@@ -359,13 +401,13 @@ func (c *Controller) clusterStop(ctx context.Context, j *Job) error {
 
 func (c *Controller) clusterDelete(ctx context.Context, j *Job) error {
 	if err := j.step(ctx, 0, func(ctx context.Context) error {
-		return j.run(ctx, "", "k3d", "cluster", "delete", c.cluster)
+		return j.run(ctx, "", "k3d", "cluster", "delete", c.k3d())
 	}); err != nil {
 		return err
 	}
 	c.cfg.Kube.Reset()
 	return j.step(ctx, 1, func(ctx context.Context) error {
-		for _, r := range []string{"k3d-registry.localhost", "k3d-" + c.cluster + "-registry"} {
+		for _, r := range []string{"k3d-registry.localhost", "k3d-" + c.k3d() + "-registry"} {
 			if _, err := quiet(ctx, 5*time.Second, "docker", "inspect", r); err == nil {
 				if err := j.run(ctx, "", "k3d", "registry", "delete", r); err != nil {
 					return err
@@ -379,9 +421,9 @@ func (c *Controller) clusterDelete(ctx context.Context, j *Job) error {
 // kubeconfigFile writes a single-context kubeconfig for beekeeper, so it
 // can only ever reach the local cluster.
 func (c *Controller) kubeconfigFile(ctx context.Context) (string, func(), error) {
-	out, err := quiet(ctx, 15*time.Second, "k3d", "kubeconfig", "get", c.cluster)
+	out, err := quiet(ctx, 15*time.Second, "k3d", "kubeconfig", "get", c.k3d())
 	if err != nil {
-		return "", nil, fmt.Errorf("k3d kubeconfig get %s: %v", c.cluster, err)
+		return "", nil, fmt.Errorf("k3d kubeconfig get %s: %v", c.k3d(), err)
 	}
 	if err := os.MkdirAll(c.stateDir, 0o700); err != nil {
 		return "", nil, err
@@ -425,7 +467,7 @@ func (c *Controller) beeDeploy(ctx context.Context, j *Job, pl Plan) error {
 	}); err != nil {
 		return err
 	}
-	if err := j.step(ctx, 1, func(ctx context.Context) error { return c.installGeth(ctx, j, c.cfg.Namespace) }); err != nil {
+	if err := j.step(ctx, 1, func(ctx context.Context) error { return c.installGeth(ctx, j, c.ns()) }); err != nil {
 		return err
 	}
 	var dir string
@@ -455,7 +497,7 @@ func (c *Controller) beeDeploy(ctx context.Context, j *Job, pl Plan) error {
 		return err
 	}
 	if err := j.step(ctx, 4, func(ctx context.Context) error {
-		sets, err := cs.AppsV1().StatefulSets(c.cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: beeSelector})
+		sets, err := cs.AppsV1().StatefulSets(c.ns()).List(ctx, metav1.ListOptions{LabelSelector: beeSelector})
 		if err != nil {
 			return err
 		}
@@ -489,7 +531,7 @@ func (c *Controller) beeDeploy(ctx context.Context, j *Job, pl Plan) error {
 
 func (c *Controller) waitNodesReady(ctx context.Context, j *Job, cs *kubernetes.Clientset, timeout time.Duration) error {
 	return j.waitFor(ctx, "all Bee nodes to be ready", timeout, 3*time.Second, func(ctx context.Context) (bool, error) {
-		sets, err := cs.AppsV1().StatefulSets(c.cfg.Namespace).List(ctx, metav1.ListOptions{LabelSelector: beeSelector})
+		sets, err := cs.AppsV1().StatefulSets(c.ns()).List(ctx, metav1.ListOptions{LabelSelector: beeSelector})
 		if err != nil {
 			return false, err
 		}
@@ -518,7 +560,7 @@ func (c *Controller) deleteByLabel(ctx context.Context, j *Job, selector string)
 	if _, err := quiet(ctx, 10*time.Second, "kubectl", c.kubectl("get", "crd", "ingressroutes.traefik.io")...); err == nil {
 		kinds += ",ingressroutes.traefik.io"
 	}
-	return j.run(ctx, "", "kubectl", c.kubectl("delete", kinds, "-n", c.cfg.Namespace, "-l", selector, "--ignore-not-found", "--wait=false")...)
+	return j.run(ctx, "", "kubectl", c.kubectl("delete", kinds, "-n", c.ns(), "-l", selector, "--ignore-not-found", "--wait=false")...)
 }
 
 func (c *Controller) nodeOp(ctx context.Context, j *Job, op, node string) error {
@@ -526,7 +568,7 @@ func (c *Controller) nodeOp(ctx context.Context, j *Job, op, node string) error 
 	if err != nil {
 		return err
 	}
-	ns := c.cfg.Namespace
+	ns := c.ns()
 	set, err := cs.AppsV1().StatefulSets(ns).Get(ctx, node, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("node %s: %w", node, err)
@@ -574,7 +616,7 @@ func (c *Controller) restartAll(ctx context.Context, j *Job) error {
 		return err
 	}
 	if err := j.step(ctx, 0, func(ctx context.Context) error {
-		return j.run(ctx, "", "kubectl", c.kubectl("delete", "pod", "-n", c.cfg.Namespace, "-l", beeSelector, "--wait=false")...)
+		return j.run(ctx, "", "kubectl", c.kubectl("delete", "pod", "-n", c.ns(), "-l", beeSelector, "--wait=false")...)
 	}); err != nil {
 		return err
 	}
@@ -641,15 +683,169 @@ func (c *Controller) imageBuild(ctx context.Context, j *Job, tag string) error {
 	})
 }
 
-func (c *Controller) checkRun(ctx context.Context, j *Job, checks []string, timeout time.Duration) error {
+// BeekeeperCommands are the commands the Beekeeper panel runs.
+var BeekeeperCommands = []string{"check", "simulate", "print", "stamper-create", "stamper-topup", "stamper-dilute", "node-funder", "restart"}
+
+var (
+	printWhat = map[string]bool{"addresses": true, "depths": true, "nodes": true, "overlays": true, "peers": true, "topologies": true}
+	batchID   = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	labelText = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+)
+
+func parseDur(s, def string, max time.Duration) (string, error) {
+	if s == "" {
+		s = def
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 || d > max {
+		return "", fmt.Errorf("invalid duration %q (e.g. 15m, 24h; at most %s)", s, max)
+	}
+	return d.String(), nil
+}
+
+// beekeeperArgs validates a Beekeeper panel request and returns the command
+// arguments (without cluster, config and kubeconfig flags) and a job title.
+// Every value is typed and checked: nothing is passed through verbatim.
+func beekeeperArgs(req ActionRequest) ([]string, string, error) {
+	for _, n := range req.Nodes {
+		if !nodeName.MatchString(n) {
+			return nil, "", fmt.Errorf("invalid node name %q", n)
+		}
+	}
+	scope := "whole cluster"
+	if len(req.Nodes) > 0 {
+		scope = strings.Join(req.Nodes, ", ")
+	}
+	timeout, err := parseDur(req.Timeout, "15m", 3*time.Hour)
+	if err != nil {
+		return nil, "", err
+	}
+	seed := func(args []string) []string {
+		if req.Seed != nil {
+			args = append(args, "--seed", strconv.FormatInt(*req.Seed, 10))
+		}
+		return args
+	}
+	var args []string
+	var what string
+	switch req.Command {
+	case "check":
+		if len(req.Checks) == 0 {
+			return nil, "", errors.New("choose at least one check")
+		}
+		for _, ch := range req.Checks {
+			if !checkRe.MatchString(ch) {
+				return nil, "", fmt.Errorf("invalid check name %q", ch)
+			}
+		}
+		args = seed([]string{"check", "--checks", strings.Join(req.Checks, ","), "--metrics-enabled=false", "--timeout", timeout})
+		what = "check " + strings.Join(req.Checks, ", ")
+	case "simulate":
+		if len(req.Simulations) == 0 {
+			return nil, "", errors.New("choose at least one simulation")
+		}
+		for _, sm := range req.Simulations {
+			if !checkRe.MatchString(sm) {
+				return nil, "", fmt.Errorf("invalid simulation name %q", sm)
+			}
+		}
+		args = seed([]string{"simulate", "--simulations", strings.Join(req.Simulations, ","), "--metrics-enabled=false", "--timeout", timeout})
+		what = "simulate " + strings.Join(req.Simulations, ", ")
+	case "print":
+		if !printWhat[req.What] {
+			return nil, "", errors.New("print needs one of: addresses, depths, nodes, overlays, peers, topologies")
+		}
+		args = []string{"print", req.What, "--timeout", timeout}
+		what = "print " + req.What
+	case "stamper-create":
+		depth := req.Depth
+		if depth == 0 {
+			depth = 17
+		}
+		if depth < 17 || depth > 40 {
+			return nil, "", errors.New("depth must be 17–40")
+		}
+		dur, err := parseDur(req.Duration, "24h", 365*24*time.Hour)
+		if err != nil {
+			return nil, "", err
+		}
+		label := req.Label
+		if label == "" {
+			label = "beekeeper"
+		}
+		if !labelText.MatchString(label) {
+			return nil, "", errors.New("label: letters, digits, _ . - only")
+		}
+		args = []string{"stamper", "create", "--depth", strconv.Itoa(depth), "--duration", dur, "--postage-label", label, "--timeout", timeout}
+		what = fmt.Sprintf("stamper create depth %d for %s", depth, dur)
+	case "stamper-topup":
+		ttl, err := parseDur(req.TTLThreshold, "120h", 365*24*time.Hour)
+		if err != nil {
+			return nil, "", err
+		}
+		to, err := parseDur(req.TopupTo, "720h", 3*365*24*time.Hour)
+		if err != nil {
+			return nil, "", err
+		}
+		args = []string{"stamper", "topup", "--ttl-threshold", ttl, "--topup-to", to, "--timeout", timeout}
+		what = "stamper topup to " + to
+	case "stamper-dilute":
+		usage := req.UsageThreshold
+		if usage == 0 {
+			usage = 90
+		}
+		levels := req.DilutionDepth
+		if levels == 0 {
+			levels = 1
+		}
+		if usage <= 0 || usage > 100 || levels < 1 || levels > 10 {
+			return nil, "", errors.New("usage threshold must be 0–100 % and dilution depth 1–10")
+		}
+		args = []string{"stamper", "dilute", "--usage-threshold", strconv.FormatFloat(usage, 'f', -1, 64), "--dilution-depth", strconv.Itoa(levels), "--timeout", timeout}
+		what = fmt.Sprintf("stamper dilute +%d above %g%%", levels, usage)
+	case "node-funder":
+		if req.MinNative < 0 || req.MinSwarm < 0 || req.MinNative > 1000 || req.MinSwarm > 1e6 || (req.MinNative == 0 && req.MinSwarm == 0) {
+			return nil, "", errors.New("set a minimum ETH and/or BZZ balance (positive)")
+		}
+		args = []string{"node-funder", "--min-native", strconv.FormatFloat(req.MinNative, 'f', -1, 64), "--min-swarm", strconv.FormatFloat(req.MinSwarm, 'f', -1, 64), "--timeout", timeout}
+		what = "node-funder"
+	case "restart":
+		args = []string{"restart", "--timeout", timeout}
+		if img := strings.TrimSpace(req.Image); img != "" {
+			if !imageRef.MatchString(img) {
+				return nil, "", errors.New("invalid image reference")
+			}
+			args = append(args, "--image", img)
+		}
+		what = "restart"
+	default:
+		return nil, "", fmt.Errorf("unknown beekeeper command %q", req.Command)
+	}
+	if strings.HasPrefix(req.Command, "stamper-") && len(req.BatchIDs) > 0 && req.Command != "stamper-create" {
+		for _, id := range req.BatchIDs {
+			if !batchID.MatchString(id) {
+				return nil, "", fmt.Errorf("invalid batch id %q", id)
+			}
+		}
+		args = append(args, "--batch-ids", strings.Join(req.BatchIDs, ","))
+	}
+	return args, "beekeeper " + what + " · " + scope, nil
+}
+
+// runBeekeeper runs a beekeeper command against the deployed layout, or
+// against just the chosen nodes.
+func (c *Controller) runBeekeeper(ctx context.Context, j *Job, nodes []string, args []string, cluster string) error {
 	s := c.Settings()
 	if s.Profile == "" {
-		return errors.New("deploy once from the Cluster tab (or choose a profile) so the checks know the cluster layout")
+		return errors.New("bee-scope does not know the cluster layout yet: deploy once from the Cluster tab (or choose a profile there)")
 	}
 	var dir string
 	if err := j.step(ctx, 0, func(ctx context.Context) error {
 		var err error
-		dir, _, err = c.writeManagedConfig(Plan{Profile: s.Profile, Counts: s.Counts, Image: s.Image})
+		dir, _, err = c.writeManagedConfig(Plan{Profile: s.Profile, Counts: s.Counts, Image: s.Image, Only: nodes})
+		if err == nil {
+			j.logf("info", "  cluster %q from profile %q", cluster, s.Profile)
+		}
 		return err
 	}); err != nil {
 		return err
@@ -664,8 +860,12 @@ func (c *Controller) checkRun(ctx context.Context, j *Job, checks []string, time
 			return err
 		}
 		defer cleanup()
-		return j.run(ctx, "", bin, "check", "--cluster-name", ManagedCluster, "--config-dir", dir, "--kubeconfig", kc,
-			"--checks", strings.Join(checks, ","), "--metrics-enabled=false", "--timeout", timeout.String())
+		full := append([]string{}, args...)
+		if _, has := flagValue(args, "--cluster-name"); !has && !namespaced(args) {
+			full = append(full, "--cluster-name", cluster)
+		}
+		full = append(full, "--config-dir", dir, "--kubeconfig", kc)
+		return j.run(ctx, "", bin, full...)
 	})
 }
 
@@ -711,4 +911,191 @@ func (c *Controller) DefaultsFromDeployment(ctx context.Context) {
 	_, _ = c.UpdateSettings(Settings{Profile: best, Counts: counts, Image: st.Deployed.Image})
 	b, _ := json.Marshal(counts)
 	c.cfg.Log.Info("cluster control: matched the deployed nodes", "profile", best, "counts", string(b))
+}
+
+// requiredBZZ is the swap-initial-deposit (in BZZ) of the chosen profile.
+func (c *Controller) requiredBZZ() float64 {
+	prof := c.Settings().Profile
+	profiles, _ := c.profilesAndChecks()
+	for _, p := range profiles {
+		if p.Name == prof {
+			return p.RequiredBZZ
+		}
+	}
+	return 0
+}
+
+// clusterFor picks and checks the beekeeper --cluster-name: the managed
+// cluster, the node selection, or a profile in the config dir that targets
+// the watched namespace.
+func (c *Controller) clusterFor(req ActionRequest, args []string) (string, error) {
+	name := req.Cluster
+	if v, ok := flagValue(args, "--cluster-name"); ok {
+		name = v
+	}
+	if name == "" {
+		if len(req.Nodes) > 0 {
+			return SelectionCluster, nil
+		}
+		return ManagedCluster, nil
+	}
+	switch name {
+	case ManagedCluster:
+		return name, nil
+	case SelectionCluster:
+		if len(req.Nodes) == 0 {
+			return "", errors.New("bee-scope-selection needs chosen nodes (Scope: Chosen nodes)")
+		}
+		return name, nil
+	}
+	profiles, _ := c.profilesAndChecks()
+	for _, p := range profiles {
+		if p.Name == name {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("cluster %q is not a beekeeper cluster for namespace %q in the config dir", name, c.ns())
+}
+
+// flagValue finds --name value or --name=value.
+func flagValue(args []string, name string) (string, bool) {
+	for i, a := range args {
+		if a == name && i+1 < len(args) {
+			return args[i+1], true
+		}
+		if strings.HasPrefix(a, name+"=") {
+			return a[len(name)+1:], true
+		}
+	}
+	return "", false
+}
+
+// namespaced reports commands told to work on a namespace instead of a
+// cluster (beekeeper ignores --cluster-name then).
+func namespaced(args []string) bool {
+	for _, a := range args {
+		if a == "-n" || a == "--namespace" || strings.HasPrefix(a, "--namespace=") || strings.HasPrefix(a, "--addresses") || a == "-a" {
+			return true
+		}
+	}
+	return false
+}
+
+// rawSubcommands are the beekeeper commands a hand-edited line may run.
+var rawSubcommands = map[string]bool{
+	"check": true, "simulate": true, "print": true, "stamper": true, "node-funder": true, "fund": true,
+	"restart": true, "nuke": true, "create": true, "delete": true, "version": true,
+}
+
+// rawForbidden are flags that would point beekeeper at another cluster or
+// config; bee-scope supplies them itself.
+var rawForbidden = []string{"--kubeconfig", "--in-cluster", "--config", "--config-dir", "--config-git-repo", "--config-git-branch",
+	"--config-git-dir", "--config-git-username", "--config-git-password", "--enable-k8s"}
+
+// parseRaw splits a hand-edited command line (shell-style quoting, no
+// shell is involved) and checks it: an optional leading "$" and
+// "beekeeper", an allowed subcommand, no forbidden flags. check and
+// simulate default to --metrics-enabled=false so nothing is pushed to the
+// staging pushgateway.
+func parseRaw(line string) ([]string, error) {
+	if len(line) > 4000 {
+		return nil, errors.New("command line too long")
+	}
+	args, err := splitArgs(line)
+	if err != nil {
+		return nil, err
+	}
+	if len(args) > 0 && args[0] == "$" {
+		args = args[1:]
+	}
+	if len(args) > 0 && (args[0] == "beekeeper" || strings.HasSuffix(args[0], "/beekeeper")) {
+		args = args[1:]
+	}
+	if len(args) == 0 {
+		return nil, errors.New("empty command: e.g. beekeeper check --checks ci-pingpong")
+	}
+	if len(args) > 80 {
+		return nil, errors.New("too many arguments")
+	}
+	if !rawSubcommands[args[0]] {
+		return nil, fmt.Errorf("unsupported beekeeper command %q (allowed: check, simulate, print, stamper, node-funder, fund, restart, nuke, create, delete, version)", args[0])
+	}
+	for _, a := range args {
+		for _, f := range rawForbidden {
+			if a == f || strings.HasPrefix(a, f+"=") {
+				return nil, fmt.Errorf("%s is set by bee-scope (it keeps beekeeper on the selected cluster); remove it", f)
+			}
+		}
+		if strings.ContainsAny(a, "\x00\n\r") {
+			return nil, errors.New("control characters are not allowed")
+		}
+	}
+	if args[0] == "check" || args[0] == "simulate" {
+		if _, ok := flagValue(args, "--metrics-enabled"); !ok && !contains(args, "--metrics-enabled") {
+			args = append(args, "--metrics-enabled=false")
+		}
+	}
+	return args, nil
+}
+
+func contains(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// splitArgs splits like a POSIX shell: whitespace separates, single quotes
+// are literal, double quotes allow \" and \\, backslash escapes outside
+// quotes.
+func splitArgs(s string) ([]string, error) {
+	var out []string
+	var cur strings.Builder
+	in := false
+	var quote rune
+	esc := false
+	for _, r := range s {
+		switch {
+		case esc:
+			cur.WriteRune(r)
+			esc = false
+		case quote == '\'':
+			if r == '\'' {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case quote == '"':
+			switch r {
+			case '"':
+				quote = 0
+			case '\\':
+				esc = true
+			default:
+				cur.WriteRune(r)
+			}
+		case r == '\\':
+			esc, in = true, true
+		case r == '\'' || r == '"':
+			quote, in = r, true
+		case r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			if in {
+				out = append(out, cur.String())
+				cur.Reset()
+				in = false
+			}
+		default:
+			cur.WriteRune(r)
+			in = true
+		}
+	}
+	if quote != 0 || esc {
+		return nil, errors.New("unterminated quote or escape")
+	}
+	if in {
+		out = append(out, cur.String())
+	}
+	return out, nil
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -182,4 +183,46 @@ func (s *Server) quit(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(300 * time.Millisecond)
 		s.cfg.Quit()
 	}()
+}
+
+func (s *Server) controlContexts(w http.ResponseWriter, r *http.Request) {
+	if s.controlOff(w) {
+		return
+	}
+	ctxs, err := s.cfg.Control.Contexts()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	k, ns := s.cfg.Control.Target()
+	writeJSON(w, map[string]any{"current": map[string]string{"context": k, "namespace": ns}, "allowRemote": s.cfg.Control.AllowRemote(), "contexts": ctxs})
+}
+
+var nsRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+
+func (s *Server) controlSetContext(w http.ResponseWriter, r *http.Request) {
+	if s.controlOff(w) {
+		return
+	}
+	var req struct {
+		Context   string `json:"context"`
+		Namespace string `json:"namespace"`
+	}
+	if !decodeConfirmed(w, r, &req) {
+		return
+	}
+	if !nsRe.MatchString(req.Namespace) {
+		httpError(w, http.StatusBadRequest, "invalid namespace")
+		return
+	}
+	if err := s.cfg.Control.SetTarget(req.Context, req.Namespace); err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, control.ErrBusy) {
+			code = http.StatusConflict
+		}
+		httpError(w, code, err.Error())
+		return
+	}
+	k, ns := s.cfg.Control.Target()
+	writeJSON(w, map[string]any{"current": map[string]string{"context": k, "namespace": ns}})
 }

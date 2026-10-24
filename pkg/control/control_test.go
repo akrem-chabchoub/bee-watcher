@@ -14,6 +14,9 @@ clusters:
   local:
     _inherit: ""
     namespace: local
+    funding:
+      eth: 0.1
+      bzz: 100.0
     node-groups:
       bootnode:
         mode: bootnode
@@ -37,6 +40,7 @@ clusters:
           - name: bootnode-0
       bee:
         config: local-dns
+        bee-config: bee-local-dns
         count: 3
         mode: node
       light:
@@ -57,6 +61,11 @@ node-groups:
     _inherit: local
   local-light:
     _inherit: local
+bee-configs:
+  bee-local:
+    swap-initial-deposit: 500000000000000000
+  bee-local-dns:
+    _inherit: bee-local
 checks:
   ci-pushsync:
     options: {}
@@ -95,6 +104,9 @@ func TestProfiles(t *testing.T) {
 		if want[g.Name] != g.Count {
 			t.Fatalf("group %s count %d, want %d", g.Name, g.Count, want[g.Name])
 		}
+	}
+	if dns.RequiredBZZ != 50 || dns.Funding.BZZ != 100 || dns.Funding.ETH != 0.1 {
+		t.Fatalf("funding = %+v, required BZZ %v (swap-initial-deposit through bee-config inheritance)", dns.Funding, dns.RequiredBZZ)
 	}
 	if dns.Groups[0].Mode != "bootnode" {
 		t.Fatalf("bootnode group must come first: %+v", dns.Groups)
@@ -225,5 +237,115 @@ func TestRunValidation(t *testing.T) {
 	}
 	if _, err := c.Run("check-run", ActionRequest{}); err == nil {
 		t.Error("check-run without checks must fail")
+	}
+}
+
+func TestSelectionCluster(t *testing.T) {
+	c := testController(t)
+	dir, _, err := c.writeManagedConfig(Plan{Profile: "local-dns", Counts: map[string]int{"bee": 4}, Only: []string{"bee-3", "bootnode-0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "zz-bee-scope.yaml"))
+	var doc struct {
+		Clusters map[string]struct {
+			NodeGroups map[string]struct {
+				Count int              `yaml:"count"`
+				Nodes []map[string]any `yaml:"nodes"`
+			} `yaml:"node-groups"`
+		} `yaml:"clusters"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	sel := doc.Clusters[SelectionCluster].NodeGroups
+	if len(sel) != 2 || len(sel["bee"].Nodes) != 1 || sel["bee"].Nodes[0]["name"] != "bee-3" || sel["bee"].Count != 0 {
+		t.Fatalf("selection = %+v", sel)
+	}
+	if _, ok := sel["light"]; ok {
+		t.Fatal("groups without chosen nodes must be left out")
+	}
+	if len(sel["bootnode"].Nodes) != 1 || sel["bootnode"].Nodes[0]["name"] != "bootnode-0" {
+		t.Fatalf("bootnode = %+v", sel["bootnode"])
+	}
+	if doc.Clusters[ManagedCluster].NodeGroups["bee"].Count != 4 {
+		t.Fatal("the full cluster stays defined next to the selection")
+	}
+	if _, _, err := c.writeManagedConfig(Plan{Profile: "local-dns", Counts: map[string]int{"bee": 2}, Only: []string{"bee-7"}}); err == nil || !strings.Contains(err.Error(), "bee-7") {
+		t.Fatalf("a node outside the layout must be named in the error: %v", err)
+	}
+}
+
+func TestBeekeeperArgs(t *testing.T) {
+	seed := int64(7)
+	args, title, err := beekeeperArgs(ActionRequest{Command: "check", Checks: []string{"ci-pingpong"}, Nodes: []string{"bee-1"}, Seed: &seed, Timeout: "10m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(args, " "); got != "check --checks ci-pingpong --metrics-enabled=false --timeout 10m0s --seed 7" {
+		t.Fatalf("args = %s", got)
+	}
+	if title != "beekeeper check ci-pingpong · bee-1" {
+		t.Fatalf("title = %s", title)
+	}
+	args, _, err = beekeeperArgs(ActionRequest{Command: "stamper-topup", BatchIDs: []string{strings.Repeat("a", 64)}})
+	if err != nil || !strings.Contains(strings.Join(args, " "), "--ttl-threshold 120h0m0s --topup-to 720h0m0s") || args[len(args)-1] != strings.Repeat("a", 64) {
+		t.Fatalf("topup = %v %v", args, err)
+	}
+	for _, bad := range []ActionRequest{
+		{Command: "print", What: "secrets"},
+		{Command: "check", Checks: []string{"x,--kubeconfig=/x"}},
+		{Command: "stamper-create", Depth: 3},
+		{Command: "stamper-create", Label: "a b"},
+		{Command: "stamper-dilute", BatchIDs: []string{"zz"}},
+		{Command: "node-funder"},
+		{Command: "restart", Image: "x y"},
+		{Command: "check", Checks: []string{"a"}, Nodes: []string{"bee-1;x"}},
+		{Command: "check", Checks: []string{"a"}, Timeout: "-1s"},
+		{Command: "rm"},
+	} {
+		if _, _, err := beekeeperArgs(bad); err == nil {
+			t.Errorf("%+v: expected an error", bad)
+		}
+	}
+}
+
+func TestParseRaw(t *testing.T) {
+	args, err := parseRaw(`$ beekeeper node-funder --min-native 0.1 --min-swarm 100 --timeout 15m --cluster-name bee-scope`)
+	if err != nil || strings.Join(args, "|") != "node-funder|--min-native|0.1|--min-swarm|100|--timeout|15m|--cluster-name|bee-scope" {
+		t.Fatalf("args = %q %v", args, err)
+	}
+	args, err = parseRaw(`check --checks ci-pingpong --seed 3 --metrics-labels "team=swarm x"`)
+	if err != nil || args[len(args)-1] != "--metrics-enabled=false" || args[6] != "team=swarm x" {
+		t.Fatalf("check args = %q %v", args, err)
+	}
+	if v, ok := flagValue([]string{"print", "--cluster-name=local"}, "--cluster-name"); !ok || v != "local" {
+		t.Fatal("flagValue =form")
+	}
+	for _, bad := range []string{
+		"", "beekeeper", "rm -rf /", "beekeeper operator", `check --kubeconfig /tmp/x`, `check --config-dir=/etc`, `check --in-cluster`,
+		`print 'unterminated`, "check --checks a\x00b",
+	} {
+		if _, err := parseRaw(bad); err == nil {
+			t.Errorf("%q: expected an error", bad)
+		}
+	}
+}
+
+func TestClusterFor(t *testing.T) {
+	c := testController(t)
+	if n, err := c.clusterFor(ActionRequest{}, []string{"print"}); err != nil || n != ManagedCluster {
+		t.Fatal(n, err)
+	}
+	if n, err := c.clusterFor(ActionRequest{Nodes: []string{"bee-1"}}, []string{"print"}); err != nil || n != SelectionCluster {
+		t.Fatal(n, err)
+	}
+	if n, err := c.clusterFor(ActionRequest{}, []string{"print", "--cluster-name", "local-dns"}); err != nil || n != "local-dns" {
+		t.Fatal(n, err)
+	}
+	for _, req := range []ActionRequest{{Cluster: "remote"}, {Cluster: SelectionCluster}, {Cluster: "nope"}} {
+		if _, err := c.clusterFor(req, []string{"print"}); err == nil {
+			t.Errorf("%+v: expected an error", req)
+		}
 	}
 }

@@ -14,14 +14,17 @@ import (
 // Settings are the paths and deployment choices the Cluster tab edits. They
 // persist in the user config dir.
 type Settings struct {
-	BeelocalDir        string          `json:"beelocalDir"`
-	BeekeeperConfigDir string          `json:"beekeeperConfigDir"`
-	BeeRepoDir         string          `json:"beeRepoDir"`
-	Beekeeper          string          `json:"beekeeper"`
-	Profile            string          `json:"profile"`
-	Counts             map[string]int  `json:"counts"`
-	Image              string          `json:"image"`
-	Detected           map[string]bool `json:"detected"`
+	BeelocalDir        string         `json:"beelocalDir"`
+	BeekeeperConfigDir string         `json:"beekeeperConfigDir"`
+	BeeRepoDir         string         `json:"beeRepoDir"`
+	Beekeeper          string         `json:"beekeeper"`
+	Profile            string         `json:"profile"`
+	Counts             map[string]int `json:"counts"`
+	Image              string         `json:"image"`
+	// KubeContext and Namespace are the last target chosen in the UI.
+	KubeContext string          `json:"kubeContext,omitempty"`
+	Namespace   string          `json:"namespace,omitempty"`
+	Detected    map[string]bool `json:"detected"`
 }
 
 func (c *Controller) settingsPath() string { return filepath.Join(c.stateDir, "settings.json") }
@@ -31,17 +34,45 @@ func (c *Controller) loadSettings() {
 	if b, err := os.ReadFile(c.settingsPath()); err == nil {
 		_ = json.Unmarshal(b, &s)
 	}
+	// Detected values are detected again on every start, so moving a
+	// checkout or rebuilding beekeeper is picked up; only values the user
+	// typed stick.
+	for key, det := range s.Detected {
+		if !det {
+			continue
+		}
+		switch key {
+		case "beekeeper":
+			s.Beekeeper = ""
+		case "beekeeperConfigDir":
+			s.BeekeeperConfigDir = ""
+		case "beelocalDir":
+			s.BeelocalDir = ""
+		case "beeRepoDir":
+			s.BeeRepoDir = ""
+		}
+	}
 	s.Detected = map[string]bool{}
 	home, _ := os.UserHomeDir()
 	bk := readBeekeeperYAML(home)
-	if s.Beekeeper == "" {
-		if p, err := exec.LookPath("beekeeper"); err == nil {
-			s.Beekeeper, s.Detected["beekeeper"] = p, true
-		}
-	}
 	if s.BeekeeperConfigDir == "" {
 		if d := expandHome(bk.ConfigDir, home); d != "" && isDir(d) {
 			s.BeekeeperConfigDir, s.Detected["beekeeperConfigDir"] = d, true
+		}
+	}
+	if s.Beekeeper == "" {
+		// Prefer the binary built in the beekeeper checkout that owns the
+		// config dir: an older installed beekeeper may not parse that
+		// checkout's config.
+		if s.BeekeeperConfigDir != "" {
+			if p := filepath.Join(filepath.Dir(s.BeekeeperConfigDir), "dist", "beekeeper"); isFile(p) {
+				s.Beekeeper, s.Detected["beekeeper"] = p, true
+			}
+		}
+		if s.Beekeeper == "" {
+			if p, err := exec.LookPath("beekeeper"); err == nil {
+				s.Beekeeper, s.Detected["beekeeper"] = p, true
+			}
 		}
 	}
 	roots := searchRoots(home, s.BeekeeperConfigDir)
@@ -64,7 +95,6 @@ func (c *Controller) saveSettings() error {
 		return err
 	}
 	s := c.settings
-	s.Detected = nil
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
